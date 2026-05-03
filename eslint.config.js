@@ -5,7 +5,16 @@ import globals from "globals";
 import eslintConfigPrettier from "eslint-config-prettier";
 
 export default tseslint.config(
-  { ignores: ["dist", "target", "src-tauri/target", "src-tauri/gen", "node_modules"] },
+  {
+    ignores: [
+      "dist",
+      "target",
+      "src-tauri/target",
+      "src-tauri/gen",
+      "node_modules",
+      "src/routeTree.gen.ts",
+    ],
+  },
   ...tseslint.configs.recommended,
   {
     files: ["**/*.{ts,tsx}"],
@@ -23,4 +32,10 @@ export default tseslint.config(
     },
   },
   eslintConfigPrettier,
+  {
+    files: ["src/routes/**/*.{ts,tsx}"],
+    rules: {
+      "react-refresh/only-export-components": "off",
+    },
+  },
 );

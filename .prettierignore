@@ -5,3 +5,4 @@ bun.lockb
 bun.lock
 src-tauri/target/
 src-tauri/gen/
+src/routeTree.gen.ts
