@@ -3,4 +3,5 @@ resolver = "2"
 members = [
     "crates/tallytape-core",
     "crates/tallytape-writer",
+    "src-tauri",
 ]
