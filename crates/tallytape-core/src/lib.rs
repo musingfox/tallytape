@@ -1,1 +1,2 @@
-//! tallytape-core
+mod db;
+pub use db::Database;
