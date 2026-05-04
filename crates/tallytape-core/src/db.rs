@@ -5,7 +5,12 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("../migrations/0001_initial.sql"))])
+    Migrations::new(vec![
+        M::up(include_str!("../migrations/0001_initial.sql")),
+        M::up(include_str!(
+            "../migrations/0002_receipts_updated_at_trigger.sql"
+        )),
+    ])
 }
 
 fn init_connection(path: &Path) -> anyhow::Result<Connection> {
@@ -203,7 +208,10 @@ mod tests {
         let uv: i32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(uv, 1, "user_version should be 1 (one migration applied)");
+        assert_eq!(
+            uv, 2,
+            "user_version should match number of migrations applied"
+        );
     }
 
     #[test]
@@ -327,5 +335,60 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0, "poisoned insert should have been rolled back");
+    }
+
+    #[test]
+    fn receipts_updated_at_refreshed_on_update() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("touch.db")).expect("open should succeed");
+        let conn = db.lock();
+
+        // Seed a session and a receipt with a backdated updated_at.
+        conn.execute(
+            "INSERT INTO sessions (source, external_id, started_at) VALUES ('test', 's1', 0)",
+            [],
+        )
+        .unwrap();
+        let session_id: i64 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO receipts (session_id, created_at, updated_at) VALUES (?1, 1000, 1000)",
+            rusqlite::params![session_id],
+        )
+        .unwrap();
+        let receipt_id: i64 = conn.last_insert_rowid();
+
+        // Touch a non-updated_at column; trigger should bump updated_at to unixepoch().
+        conn.execute(
+            "UPDATE receipts SET created_at = 2000 WHERE id = ?1",
+            rusqlite::params![receipt_id],
+        )
+        .unwrap();
+
+        let updated_at: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM receipts WHERE id = ?1",
+                rusqlite::params![receipt_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            updated_at > 1000,
+            "updated_at should be refreshed to a current unix epoch (got {updated_at})"
+        );
+
+        // Explicit updated_at should be preserved (WHEN guard prevents re-fire).
+        conn.execute(
+            "UPDATE receipts SET updated_at = 9999 WHERE id = ?1",
+            rusqlite::params![receipt_id],
+        )
+        .unwrap();
+        let explicit: i64 = conn
+            .query_row(
+                "SELECT updated_at FROM receipts WHERE id = ?1",
+                rusqlite::params![receipt_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(explicit, 9999, "explicit updated_at must be respected");
     }
 }
