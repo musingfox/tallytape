@@ -6,3 +6,6 @@ pub use receipt::{Receipt, ReceiptRepository};
 
 mod item;
 pub use item::{Item, ItemRepository, NewItem};
+
+mod session;
+pub use session::{NewSession, Session, SessionRepository};
