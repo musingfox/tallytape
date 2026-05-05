@@ -10,6 +10,7 @@ fn migrations() -> Migrations<'static> {
         M::up(include_str!(
             "../migrations/0002_receipts_updated_at_trigger.sql"
         )),
+        M::up(include_str!("../migrations/0003_receipts_cwd_date.sql")),
     ])
 }
 
@@ -209,8 +210,34 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            uv, 2,
+            uv, 3,
             "user_version should match number of migrations applied"
+        );
+    }
+
+    #[test]
+    fn receipts_has_unique_cwd_date_index() {
+        let db = Database::open(":memory:").expect("in-memory open should succeed");
+        let conn = db.lock();
+
+        // PRAGMA index_list returns one row per index; check that at least one
+        // unique index exists on the receipts table.
+        let mut stmt = conn
+            .prepare("PRAGMA index_list('receipts')")
+            .unwrap();
+        // Columns: seq, name, unique, origin, partial
+        let unique_count: i64 = stmt
+            .query_map([], |r| {
+                let is_unique: i64 = r.get(2)?;
+                Ok(is_unique)
+            })
+            .unwrap()
+            .filter(|r| r.as_ref().map(|v| *v == 1).unwrap_or(false))
+            .count() as i64;
+
+        assert!(
+            unique_count >= 1,
+            "receipts table must have at least one UNIQUE index (for cwd, date)"
         );
     }
 
@@ -351,7 +378,7 @@ mod tests {
         .unwrap();
         let session_id: i64 = conn.last_insert_rowid();
         conn.execute(
-            "INSERT INTO receipts (session_id, created_at, updated_at) VALUES (?1, 1000, 1000)",
+            "INSERT INTO receipts (session_id, cwd, date, created_at, updated_at) VALUES (?1, '/test', '2024-01-01', 1000, 1000)",
             rusqlite::params![session_id],
         )
         .unwrap();

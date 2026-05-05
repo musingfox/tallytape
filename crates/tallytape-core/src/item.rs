@@ -197,7 +197,7 @@ mod tests {
         let conn = db.lock();
         let external_id = format!("ext-{}", COUNTER.fetch_add(1, Ordering::Relaxed));
         conn.execute(
-            "INSERT INTO sessions (source, external_id, started_at) VALUES ('test', ?1, ?2)",
+            "INSERT INTO sessions (source, external_id, cwd, started_at) VALUES ('test', ?1, '/test', ?2)",
             rusqlite::params![external_id, started_at],
         )
         .expect("insert session should succeed");
@@ -205,9 +205,19 @@ mod tests {
     }
 
     /// Insert a receipt for `session_id` and return its `id`.
-    fn insert_receipt(db: &Database, session_id: i64) -> i64 {
+    fn insert_receipt(db: &Database, session_id: i64, started_at: i64) -> i64 {
+        // Get the cwd from the session so upsert_by_cwd_date can use it.
+        let cwd: Option<String> = {
+            let conn = db.lock();
+            conn.query_row(
+                "SELECT cwd FROM sessions WHERE id = ?1",
+                rusqlite::params![session_id],
+                |r| r.get(0),
+            )
+            .expect("session must exist")
+        };
         crate::ReceiptRepository::new(db.clone())
-            .upsert_by_session_id(session_id)
+            .upsert_by_cwd_date(Some(session_id), cwd.as_deref().unwrap_or(""), started_at)
             .expect("upsert receipt should succeed")
             .id
     }
@@ -248,7 +258,7 @@ mod tests {
         let repo = ItemRepository::new(db.clone());
 
         let sid = insert_session(&db, 1_000);
-        let rid = insert_receipt(&db, sid);
+        let rid = insert_receipt(&db, sid, 1_000);
         let new = sample_new_item(rid, sid, "req_some", 1_000);
 
         let item = repo.insert(&new).expect("insert should succeed");
@@ -290,7 +300,7 @@ mod tests {
         let repo = ItemRepository::new(db.clone());
 
         let sid = insert_session(&db, 2_000);
-        let rid = insert_receipt(&db, sid);
+        let rid = insert_receipt(&db, sid, 2_000);
 
         let new = NewItem {
             receipt_id: rid,
@@ -337,7 +347,7 @@ mod tests {
         let repo = ItemRepository::new(db.clone());
 
         let sid = insert_session(&db, 3_000);
-        let rid = insert_receipt(&db, sid);
+        let rid = insert_receipt(&db, sid, 3_000);
 
         // Insert in order 300, 100, 200
         repo.insert(&sample_new_item(rid, sid, "req_300", 300))
@@ -400,7 +410,7 @@ mod tests {
         let repo = ItemRepository::new(db.clone());
 
         let sid = insert_session(&db, 6_000);
-        let rid = insert_receipt(&db, sid);
+        let rid = insert_receipt(&db, sid, 6_000);
         // session_id 9999 does not exist
         let new = sample_new_item(rid, 9999, "req_fk_session", 6_000);
         let result = repo.insert(&new);
@@ -422,7 +432,7 @@ mod tests {
         let repo = ItemRepository::new(db.clone());
 
         let sid = insert_session(&db, 7_000);
-        let rid = insert_receipt(&db, sid);
+        let rid = insert_receipt(&db, sid, 7_000);
         let new = sample_new_item(rid, sid, "req_dup", 7_000);
 
         let first = repo.insert(&new);
@@ -447,7 +457,7 @@ mod tests {
         let repo = ItemRepository::new(db.clone());
 
         let sid = insert_session(&db, 8_000);
-        let rid = insert_receipt(&db, sid);
+        let rid = insert_receipt(&db, sid, 8_000);
 
         // All-Some item
         let all_some = repo

@@ -7,7 +7,9 @@ use crate::Database;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Receipt {
     pub id: i64,
-    pub session_id: i64,
+    pub session_id: Option<i64>,
+    pub cwd: String,
+    pub date: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -32,47 +34,52 @@ impl ReceiptRepository {
         Ok(Receipt {
             id: row.get(0)?,
             session_id: row.get(1)?,
-            created_at: row.get(2)?,
-            updated_at: row.get(3)?,
+            cwd: row.get(2)?,
+            date: row.get(3)?,
+            created_at: row.get(4)?,
+            updated_at: row.get(5)?,
         })
     }
 
-    /// Insert a receipt for `session_id` if one does not already exist, then
-    /// return the current receipt row.
+    /// Find or create a receipt for `(cwd, date(occurred_at))`.
+    ///
+    /// First-write-wins on `session_id`: if a receipt already exists for the
+    /// `(cwd, date)` pair the existing row is returned unchanged.
     ///
     /// # Atomicity
     ///
-    /// Uses `BEGIN IMMEDIATE` so the read that follows the insert is part of
-    /// the same transaction. The `ON CONFLICT DO NOTHING` strategy ensures the
-    /// `AFTER UPDATE` trigger in migration 0002 is never fired, preserving
-    /// `updated_at` idempotency.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` when `session_id` does not reference a row in `sessions`
-    /// (foreign-key violation). The transaction is rolled back and no receipt
-    /// row is left behind.
-    pub fn upsert_by_session_id(&self, session_id: i64) -> anyhow::Result<Receipt> {
+    /// Uses `BEGIN IMMEDIATE` so the SELECT that follows the insert is part of
+    /// the same transaction and no concurrent writer can interleave.
+    pub fn upsert_by_cwd_date(
+        &self,
+        seed_session_id: Option<i64>,
+        cwd: &str,
+        occurred_at: i64,
+    ) -> anyhow::Result<Receipt> {
         let mut conn = self.db.lock();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .context("upsert_by_session_id: begin transaction failed")?;
+            .context("upsert_by_cwd_date: begin transaction failed")?;
 
         tx.execute(
-            "INSERT INTO receipts(session_id) VALUES (?1) ON CONFLICT(session_id) DO NOTHING",
-            rusqlite::params![session_id],
+            "INSERT INTO receipts (session_id, cwd, date) \
+             VALUES (?1, ?2, date(?3, 'unixepoch', 'localtime')) \
+             ON CONFLICT(cwd, date) DO UPDATE SET cwd = excluded.cwd",
+            rusqlite::params![seed_session_id, cwd, occurred_at],
         )
-        .context("upsert_by_session_id: insert failed")?;
+        .context("upsert_by_cwd_date: insert failed")?;
 
         let receipt = tx
             .query_row(
-                "SELECT id, session_id, created_at, updated_at FROM receipts WHERE session_id = ?1",
-                rusqlite::params![session_id],
+                "SELECT id, session_id, cwd, date, created_at, updated_at \
+                 FROM receipts \
+                 WHERE cwd = ?1 AND date = date(?2, 'unixepoch', 'localtime')",
+                rusqlite::params![cwd, occurred_at],
                 Self::map_receipt_row,
             )
-            .context("upsert_by_session_id: select failed")?;
+            .context("upsert_by_cwd_date: select failed")?;
 
-        tx.commit().context("upsert_by_session_id: commit failed")?;
+        tx.commit().context("upsert_by_cwd_date: commit failed")?;
 
         Ok(receipt)
     }
@@ -83,7 +90,7 @@ impl ReceiptRepository {
     pub fn find_by_id(&self, id: i64) -> anyhow::Result<Option<Receipt>> {
         let conn = self.db.lock();
         conn.query_row(
-            "SELECT id, session_id, created_at, updated_at FROM receipts WHERE id = ?1",
+            "SELECT id, session_id, cwd, date, created_at, updated_at FROM receipts WHERE id = ?1",
             rusqlite::params![id],
             Self::map_receipt_row,
         )
@@ -95,7 +102,10 @@ impl ReceiptRepository {
     pub fn list(&self) -> anyhow::Result<Vec<Receipt>> {
         let conn = self.db.lock();
         let mut stmt = conn
-            .prepare("SELECT id, session_id, created_at, updated_at FROM receipts ORDER BY id DESC")
+            .prepare(
+                "SELECT id, session_id, cwd, date, created_at, updated_at \
+                 FROM receipts ORDER BY id DESC",
+            )
             .context("list: query failed")?;
 
         let rows = stmt
@@ -109,12 +119,11 @@ impl ReceiptRepository {
         Ok(receipts)
     }
 
-    /// Return receipts whose session started on a day within `[start_date, end_date]` (UTC, inclusive).
+    /// Return receipts whose `date` column is within `[start_date, end_date]` (inclusive).
     ///
     /// `start_date` and `end_date` must be ISO `YYYY-MM-DD` strings. Malformed
-    /// strings are passed straight to SQLite; `date()` returns `NULL` for them,
-    /// which causes the `BETWEEN` predicate to be false — the result will be
-    /// empty rather than an error.
+    /// strings are passed straight to SQLite; the `BETWEEN` predicate will be
+    /// false for `NULL` dates — the result will be empty rather than an error.
     pub fn list_by_date_range(
         &self,
         start_date: &str,
@@ -123,11 +132,10 @@ impl ReceiptRepository {
         let conn = self.db.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT r.id, r.session_id, r.created_at, r.updated_at \
-                 FROM receipts r \
-                 INNER JOIN sessions s ON s.id = r.session_id \
-                 WHERE date(s.started_at, 'unixepoch') BETWEEN ?1 AND ?2 \
-                 ORDER BY r.id DESC",
+                "SELECT id, session_id, cwd, date, created_at, updated_at \
+                 FROM receipts \
+                 WHERE date BETWEEN ?1 AND ?2 \
+                 ORDER BY id DESC",
             )
             .context("list_by_date_range: query failed")?;
 
@@ -160,33 +168,52 @@ mod tests {
     static COUNTER: AtomicI64 = AtomicI64::new(1);
 
     /// Insert a session and return its `rowid`.
-    fn insert_session(db: &Database, started_at: i64) -> i64 {
+    fn insert_session(db: &Database, cwd: Option<&str>, started_at: i64) -> i64 {
         let conn = db.lock();
         let external_id = format!("ext-{}", COUNTER.fetch_add(1, Ordering::Relaxed));
         conn.execute(
-            "INSERT INTO sessions (source, external_id, started_at) VALUES ('test', ?1, ?2)",
-            rusqlite::params![external_id, started_at],
+            "INSERT INTO sessions (source, external_id, cwd, started_at) VALUES ('test', ?1, ?2, ?3)",
+            rusqlite::params![external_id, cwd, started_at],
         )
         .expect("insert session should succeed");
         conn.last_insert_rowid()
     }
 
     // -------------------------------------------------------------------------
-    // 1. upsert_inserts_new_receipt
+    // 1. fresh_insert_creates_receipt
     // -------------------------------------------------------------------------
     #[test]
-    fn upsert_inserts_new_receipt() {
+    fn fresh_insert_creates_receipt() {
         let db = open_db();
         let repo = ReceiptRepository::new(db.clone());
 
-        let session_id = insert_session(&db, 0);
+        // 2024-05-05 00:00:00 UTC = 1714867200
+        let occurred_at = 1_714_867_200i64;
+        let sid = insert_session(&db, Some("/proj/a"), occurred_at);
+
         let receipt = repo
-            .upsert_by_session_id(session_id)
+            .upsert_by_cwd_date(Some(sid), "/proj/a", occurred_at)
             .expect("upsert should succeed");
 
-        assert_eq!(receipt.session_id, session_id);
         assert!(receipt.id >= 1);
-        assert_eq!(receipt.created_at, receipt.updated_at);
+        assert_eq!(receipt.session_id, Some(sid));
+        assert_eq!(receipt.cwd, "/proj/a");
+
+        // Verify date matches SQLite's computation
+        let conn = db.lock();
+        let expected_date: String = conn
+            .query_row(
+                "SELECT date(?1, 'unixepoch', 'localtime')",
+                rusqlite::params![occurred_at],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipt.date, expected_date);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     // -------------------------------------------------------------------------
@@ -197,224 +224,206 @@ mod tests {
         let db = open_db();
         let repo = ReceiptRepository::new(db.clone());
 
-        let session_id = insert_session(&db, 0);
+        let occurred_at = 1_714_867_200i64;
+        let sid = insert_session(&db, Some("/proj/a"), occurred_at);
+
         let r1 = repo
-            .upsert_by_session_id(session_id)
+            .upsert_by_cwd_date(Some(sid), "/proj/a", occurred_at)
             .expect("first upsert should succeed");
         let r2 = repo
-            .upsert_by_session_id(session_id)
+            .upsert_by_cwd_date(Some(sid), "/proj/a", occurred_at)
             .expect("second upsert should succeed");
 
         assert_eq!(r1.id, r2.id, "both calls must return the same receipt id");
-        assert_eq!(
-            r1.updated_at, r2.updated_at,
-            "updated_at must not change on second call"
-        );
-
-        let conn = db.lock();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM receipts WHERE session_id = ?1",
-                rusqlite::params![session_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1, "exactly one receipt row must exist");
-    }
-
-    // -------------------------------------------------------------------------
-    // 3. upsert_fk_violation_returns_error_and_no_row
-    // -------------------------------------------------------------------------
-    #[test]
-    fn upsert_fk_violation_returns_error_and_no_row() {
-        let db = open_db();
-        let repo = ReceiptRepository::new(db.clone());
-
-        // sessions table is empty; session 999 does not exist
-        let result = repo.upsert_by_session_id(999);
-        assert!(result.is_err(), "FK violation must return Err");
 
         let conn = db.lock();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(count, 0, "no receipt row should exist after FK error");
+        assert_eq!(count, 1, "exactly one receipt row must exist");
     }
 
     // -------------------------------------------------------------------------
-    // 4. upsert_recovers_after_fk_failure
+    // 3. first_write_wins_on_session_id
     // -------------------------------------------------------------------------
     #[test]
-    fn upsert_recovers_after_fk_failure() {
+    fn first_write_wins_on_session_id() {
         let db = open_db();
         let repo = ReceiptRepository::new(db.clone());
 
-        // First: FK violation
-        assert!(repo.upsert_by_session_id(999).is_err());
+        let t = 1_714_867_200i64;
+        let sid1 = insert_session(&db, Some("/proj/a"), t);
+        let sid2 = insert_session(&db, Some("/proj/a"), t + 60);
 
-        // Then: valid session + upsert
-        let session_id = insert_session(&db, 0);
-        let receipt = repo
-            .upsert_by_session_id(session_id)
-            .expect("upsert after rollback should succeed");
-        assert_eq!(receipt.session_id, session_id);
+        // First call creates the receipt with session_id = sid1
+        let r1 = repo
+            .upsert_by_cwd_date(Some(sid1), "/proj/a", t)
+            .expect("first upsert should succeed");
+
+        // Second call same (cwd, date) — different session_id, same date window
+        let r2 = repo
+            .upsert_by_cwd_date(Some(sid2), "/proj/a", t + 60)
+            .expect("second upsert should succeed");
+
+        assert_eq!(r1.id, r2.id, "same receipt row should be returned");
+        assert_eq!(
+            r2.session_id,
+            Some(sid1),
+            "session_id must not be overwritten (first-write-wins)"
+        );
+
+        let conn = db.lock();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     // -------------------------------------------------------------------------
-    // 5. find_by_id_returns_some_then_none
+    // 4. different_cwd_same_time_creates_new_row
     // -------------------------------------------------------------------------
     #[test]
-    fn find_by_id_returns_some_then_none() {
+    fn different_cwd_same_time_creates_new_row() {
         let db = open_db();
         let repo = ReceiptRepository::new(db.clone());
 
-        let session_id = insert_session(&db, 0);
-        let expected = repo
-            .upsert_by_session_id(session_id)
+        let t = 1_714_867_200i64;
+        let sid = insert_session(&db, Some("/proj/a"), t);
+
+        let ra = repo
+            .upsert_by_cwd_date(Some(sid), "/proj/a", t)
+            .expect("first upsert should succeed");
+        let rb = repo
+            .upsert_by_cwd_date(Some(sid), "/proj/b", t)
+            .expect("second upsert should succeed");
+
+        assert_ne!(ra.id, rb.id, "different cwd must produce different receipts");
+
+        let conn = db.lock();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. empty_cwd_works
+    // -------------------------------------------------------------------------
+    #[test]
+    fn empty_cwd_works() {
+        let db = open_db();
+        let repo = ReceiptRepository::new(db.clone());
+
+        let t = 1_714_867_200i64;
+        let sid1 = insert_session(&db, None, t);
+        let sid2 = insert_session(&db, None, t + 60);
+
+        let r1 = repo
+            .upsert_by_cwd_date(Some(sid1), "", t)
+            .expect("first empty-cwd upsert should succeed");
+        let r2 = repo
+            .upsert_by_cwd_date(Some(sid2), "", t + 60)
+            .expect("second empty-cwd upsert should succeed");
+
+        assert_eq!(r1.id, r2.id, "same date → same receipt for empty cwd");
+        assert_eq!(r1.cwd, "");
+        assert_eq!(r1.session_id, Some(sid1), "first-write-wins on session_id");
+
+        let conn = db.lock();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // 6. find_by_id_returns_new_fields
+    // -------------------------------------------------------------------------
+    #[test]
+    fn find_by_id_returns_new_fields() {
+        let db = open_db();
+        let repo = ReceiptRepository::new(db.clone());
+
+        let t = 1_714_867_200i64;
+        let sid = insert_session(&db, Some("/proj/a"), t);
+        let created = repo
+            .upsert_by_cwd_date(Some(sid), "/proj/a", t)
             .expect("upsert should succeed");
 
         let found = repo
-            .find_by_id(expected.id)
+            .find_by_id(created.id)
             .expect("find_by_id should not error");
-        assert_eq!(found, Some(expected));
 
-        let missing = repo
-            .find_by_id(9999)
-            .expect("find_by_id for missing id should not error");
-        assert_eq!(missing, None);
+        assert_eq!(found, Some(created.clone()));
+        assert!(found.unwrap().date.len() == 10, "date should be YYYY-MM-DD");
     }
 
     // -------------------------------------------------------------------------
-    // 6. list_returns_empty_when_no_rows
+    // 7. list_and_list_by_date_range_work
     // -------------------------------------------------------------------------
     #[test]
-    fn list_returns_empty_when_no_rows() {
+    fn list_returns_all_receipts_desc() {
         let db = open_db();
-        let repo = ReceiptRepository::new(db);
+        let repo = ReceiptRepository::new(db.clone());
+
+        // 2026-05-01T00:00:00 UTC
+        let t1 = 1_777_593_600i64;
+        // 2026-05-03T00:00:00 UTC
+        let t3 = 1_777_766_400i64;
+
+        let sid1 = insert_session(&db, Some("/a"), t1);
+        let sid2 = insert_session(&db, Some("/b"), t3);
+
+        repo.upsert_by_cwd_date(Some(sid1), "/a", t1).unwrap();
+        repo.upsert_by_cwd_date(Some(sid2), "/b", t3).unwrap();
 
         let receipts = repo.list().expect("list should succeed");
-        assert!(receipts.is_empty());
+        assert_eq!(receipts.len(), 2);
+        // id DESC: sid2 was inserted last
+        assert_eq!(receipts[0].cwd, "/b");
+        assert_eq!(receipts[1].cwd, "/a");
     }
 
-    // -------------------------------------------------------------------------
-    // 7. list_orders_by_id_desc
-    // -------------------------------------------------------------------------
     #[test]
-    fn list_orders_by_id_desc() {
+    fn list_by_date_range_filters_by_date_column() {
         let db = open_db();
         let repo = ReceiptRepository::new(db.clone());
 
-        let s1 = insert_session(&db, 100);
-        let s2 = insert_session(&db, 200);
-        let s3 = insert_session(&db, 300);
+        // 2026-05-01T00:00:00 UTC
+        let t1 = 1_777_593_600i64;
+        // 2026-05-03T00:00:00 UTC
+        let t3 = 1_777_766_400i64;
+        // 2026-05-05T00:00:00 UTC
+        let t5 = 1_777_939_200i64;
 
-        repo.upsert_by_session_id(s1).unwrap();
-        repo.upsert_by_session_id(s2).unwrap();
-        repo.upsert_by_session_id(s3).unwrap();
+        let sid1 = insert_session(&db, Some("/a"), t1);
+        let sid2 = insert_session(&db, Some("/b"), t3);
+        let sid3 = insert_session(&db, Some("/c"), t5);
 
-        let receipts = repo.list().expect("list should succeed");
-        assert_eq!(receipts.len(), 3);
+        // Get actual date strings from SQLite for the epochs
+        let (d1, d3, d5) = {
+            let conn = db.lock();
+            let d1: String = conn.query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t1], |r| r.get(0)).unwrap();
+            let d3: String = conn.query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t3], |r| r.get(0)).unwrap();
+            let d5: String = conn.query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t5], |r| r.get(0)).unwrap();
+            (d1, d3, d5)
+        };
 
-        let session_ids: Vec<i64> = receipts.iter().map(|r| r.session_id).collect();
-        assert_eq!(session_ids, vec![s3, s2, s1]);
-    }
-
-    // -------------------------------------------------------------------------
-    // 8. list_by_date_range_inclusive_boundaries
-    // -------------------------------------------------------------------------
-    #[test]
-    fn list_by_date_range_inclusive_boundaries() {
-        // 2026-05-01T00:00:00Z = 1777593600  → date = "2026-05-01"
-        // 2026-05-03T23:59:59Z = 1777852799  → date = "2026-05-03"
-        // 2026-05-04T00:00:00Z = 1777852800  → date = "2026-05-04"
-        let db = open_db();
-        let repo = ReceiptRepository::new(db.clone());
-
-        let sa = insert_session(&db, 1_777_593_600); // 2026-05-01
-        let sb = insert_session(&db, 1_777_852_799); // 2026-05-03 23:59:59Z → "2026-05-03"
-        let sc = insert_session(&db, 1_777_852_800); // 2026-05-04
-
-        let ra = repo.upsert_by_session_id(sa).unwrap();
-        let rb = repo.upsert_by_session_id(sb).unwrap();
-        repo.upsert_by_session_id(sc).unwrap();
+        repo.upsert_by_cwd_date(Some(sid1), "/a", t1).unwrap();
+        repo.upsert_by_cwd_date(Some(sid2), "/b", t3).unwrap();
+        repo.upsert_by_cwd_date(Some(sid3), "/c", t5).unwrap();
 
         let results = repo
-            .list_by_date_range("2026-05-01", "2026-05-03")
+            .list_by_date_range(&d1, &d3)
             .expect("list_by_date_range should succeed");
 
-        assert_eq!(results.len(), 2, "only sA and sB should be included");
+        assert_eq!(results.len(), 2, "only /a and /b should be in range");
+        assert_eq!(results[0].cwd, "/b"); // id DESC
+        assert_eq!(results[1].cwd, "/a");
 
-        // id DESC: rb has larger id than ra
-        assert_eq!(results[0].session_id, sb);
-        assert_eq!(results[1].session_id, sa);
-        let _ = (ra, rb); // suppress unused warnings
-    }
-
-    // -------------------------------------------------------------------------
-    // 9. list_by_date_range_excludes_outside_days
-    // -------------------------------------------------------------------------
-    #[test]
-    fn list_by_date_range_excludes_outside_days() {
-        // 2026-04-30T23:59:59Z = 1777593599 → date = "2026-04-30"
-        let db = open_db();
-        let repo = ReceiptRepository::new(db.clone());
-
-        let s = insert_session(&db, 1_777_593_599); // 2026-04-30
-        repo.upsert_by_session_id(s).unwrap();
-
-        let results = repo
-            .list_by_date_range("2026-05-01", "2026-05-03")
-            .expect("list_by_date_range should succeed");
-
-        assert!(
-            results.is_empty(),
-            "2026-04-30 must be excluded from [05-01, 05-03]"
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // 10. list_by_date_range_filters_multi_session
-    // -------------------------------------------------------------------------
-    #[test]
-    fn list_by_date_range_filters_multi_session() {
-        // 5 sessions on 5 consecutive days: 2026-04-29 through 2026-05-03
-        // Epochs (UTC 00:00:00 each day):
-        //   2026-04-29T00:00:00Z = 1777420800
-        //   2026-04-30T00:00:00Z = 1777507200
-        //   2026-05-01T00:00:00Z = 1777593600
-        //   2026-05-02T00:00:00Z = 1777680000
-        //   2026-05-03T00:00:00Z = 1777766400
-        let db = open_db();
-        let repo = ReceiptRepository::new(db.clone());
-
-        let epochs = [
-            1_777_420_800i64, // 2026-04-29
-            1_777_507_200,    // 2026-04-30
-            1_777_593_600,    // 2026-05-01
-            1_777_680_000,    // 2026-05-02
-            1_777_766_400,    // 2026-05-03
-        ];
-
-        let mut session_ids = Vec::new();
-        for &epoch in &epochs {
-            let sid = insert_session(&db, epoch);
-            repo.upsert_by_session_id(sid).unwrap();
-            session_ids.push(sid);
-        }
-
-        // Query 2026-04-30..2026-05-02 → 3 sessions (indices 1,2,3)
-        let results = repo
-            .list_by_date_range("2026-04-30", "2026-05-02")
-            .expect("list_by_date_range should succeed");
-
-        assert_eq!(results.len(), 3, "expected exactly 3 receipts in range");
-
-        // id DESC means last inserted first
-        let result_sids: Vec<i64> = results.iter().map(|r| r.session_id).collect();
-        assert_eq!(
-            result_sids,
-            vec![session_ids[3], session_ids[2], session_ids[1]],
-            "results should be id DESC for the 3 in-range sessions"
-        );
+        // Verify /c is excluded
+        let _ = d5; // suppress unused warning
+        let all = repo.list_by_date_range(&d1, &d5).unwrap();
+        assert_eq!(all.len(), 3);
     }
 }

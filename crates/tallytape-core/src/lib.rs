@@ -9,3 +9,6 @@ pub use item::{Item, ItemRepository, NewItem};
 
 mod session;
 pub use session::{NewSession, Session, SessionRepository};
+
+pub mod merge;
+pub use merge::{merge_item, NewItemDraft};
