@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::Path;
 
@@ -6,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
-// Public output type
+// Public output types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +24,20 @@ pub struct ParsedItem {
     pub cache_read_tokens: Option<i64>,
     pub cache_creation_tokens: Option<i64>,
     pub metadata: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TokenStats {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub cache_read_tokens: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptParseResult {
+    pub items: Vec<ParsedItem>,
+    pub stats: TokenStats,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,8 +80,122 @@ struct RawUsage {
 // Core parsing logic
 // ---------------------------------------------------------------------------
 
+/// Process a single trimmed JSONL line. Always pushes a valid item to `items`.
+/// When `dedup` is true, also accumulates token stats using the HashSet for
+/// deduplication keyed by "{message_id}:{request_id}".
+fn process_line(
+    trimmed: &str,
+    items: &mut Vec<ParsedItem>,
+    stats: &mut TokenStats,
+    seen: &mut HashSet<String>,
+    dedup: bool,
+) {
+    let raw: RawLine = match serde_json::from_str(trimmed) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("malformed JSONL line: {e}");
+            return;
+        }
+    };
+
+    // Skip non-assistant lines silently
+    match raw.kind.as_deref() {
+        Some("assistant") => {}
+        _ => return,
+    }
+
+    // Resolve request_id: prefer requestId, fall back to uuid
+    let request_id = match raw.request_id.or(raw.uuid) {
+        Some(id) => id,
+        None => {
+            log::warn!("assistant line missing both requestId and uuid — skipping");
+            return;
+        }
+    };
+
+    // Parse timestamp
+    let occurred_at = match raw.timestamp.as_deref() {
+        Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+            Ok(dt) => dt.timestamp(),
+            Err(e) => {
+                log::warn!("bad timestamp '{ts}': {e} — skipping");
+                return;
+            }
+        },
+        None => {
+            log::warn!("assistant line missing timestamp — skipping");
+            return;
+        }
+    };
+
+    // Extract model
+    let model = match raw.message.as_ref().and_then(|m| m.model.clone()) {
+        Some(m) => m,
+        None => {
+            log::warn!("assistant line missing message.model — skipping");
+            return;
+        }
+    };
+
+    // Extract usage fields
+    let usage = raw.message.as_ref().and_then(|m| m.usage.as_ref());
+    let input_tokens = usage.and_then(|u| u.input_tokens).unwrap_or(0);
+    let output_tokens = usage.and_then(|u| u.output_tokens).unwrap_or(0);
+    let cache_read_tokens = usage.and_then(|u| u.cache_read_input_tokens);
+    let cache_creation_tokens = usage.and_then(|u| u.cache_creation_input_tokens);
+    let service_tier = usage.and_then(|u| u.service_tier.clone());
+
+    // Extract message_id
+    let message_id = raw.message.as_ref().and_then(|m| m.id.clone());
+
+    // Serialize content to metadata
+    let metadata = raw
+        .message
+        .as_ref()
+        .and_then(|m| m.content.as_ref())
+        .map(|c| c.to_string());
+
+    let item = ParsedItem {
+        request_id: request_id.clone(),
+        message_id: message_id.clone(),
+        parent_uuid: raw.parent_uuid,
+        is_sidechain: raw.is_sidechain.unwrap_or(false),
+        occurred_at,
+        model,
+        service_tier,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_creation_tokens,
+        metadata,
+    };
+
+    items.push(item);
+
+    if dedup {
+        // Build dedup key only when both message_id (non-empty) and request_id (non-empty) exist.
+        // If either is missing/empty → always count (no dedup).
+        let should_count = match message_id.as_deref() {
+            Some(mid) if !mid.is_empty() && !request_id.is_empty() => {
+                let key = format!("{mid}:{request_id}");
+                seen.insert(key)
+            }
+            _ => true, // missing or empty message_id → always count
+        };
+
+        if should_count {
+            stats.input_tokens += input_tokens;
+            stats.output_tokens += output_tokens;
+            stats.cache_creation_tokens += cache_creation_tokens.unwrap_or(0);
+            stats.cache_read_tokens += cache_read_tokens.unwrap_or(0);
+        }
+    }
+}
+
 pub fn parse_transcript_reader<R: BufRead>(reader: R) -> Vec<ParsedItem> {
     let mut items = Vec::new();
+    let mut stats = TokenStats::default();
+    let mut seen = HashSet::new();
 
     for line_result in reader.lines() {
         let line = match line_result {
@@ -82,85 +211,7 @@ pub fn parse_transcript_reader<R: BufRead>(reader: R) -> Vec<ParsedItem> {
             continue;
         }
 
-        let raw: RawLine = match serde_json::from_str(trimmed) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("malformed JSONL line: {e}");
-                continue;
-            }
-        };
-
-        // Skip non-assistant lines silently
-        match raw.kind.as_deref() {
-            Some("assistant") => {}
-            _ => continue,
-        }
-
-        // Resolve request_id: prefer requestId, fall back to uuid
-        let request_id = match raw.request_id.or(raw.uuid) {
-            Some(id) => id,
-            None => {
-                log::warn!("assistant line missing both requestId and uuid — skipping");
-                continue;
-            }
-        };
-
-        // Parse timestamp
-        let occurred_at = match raw.timestamp.as_deref() {
-            Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
-                Ok(dt) => dt.timestamp(),
-                Err(e) => {
-                    log::warn!("bad timestamp '{ts}': {e} — skipping");
-                    continue;
-                }
-            },
-            None => {
-                log::warn!("assistant line missing timestamp — skipping");
-                continue;
-            }
-        };
-
-        // Extract model
-        let model = match raw.message.as_ref().and_then(|m| m.model.clone()) {
-            Some(m) => m,
-            None => {
-                log::warn!("assistant line missing message.model — skipping");
-                continue;
-            }
-        };
-
-        // Extract usage fields
-        let usage = raw.message.as_ref().and_then(|m| m.usage.as_ref());
-        let input_tokens = usage.and_then(|u| u.input_tokens).unwrap_or(0);
-        let output_tokens = usage.and_then(|u| u.output_tokens).unwrap_or(0);
-        let cache_read_tokens = usage.and_then(|u| u.cache_read_input_tokens);
-        let cache_creation_tokens = usage.and_then(|u| u.cache_creation_input_tokens);
-        let service_tier = usage.and_then(|u| u.service_tier.clone());
-
-        // Extract message_id
-        let message_id = raw.message.as_ref().and_then(|m| m.id.clone());
-
-        // Serialize content to metadata
-        let metadata = raw
-            .message
-            .as_ref()
-            .and_then(|m| m.content.as_ref())
-            .map(|c| c.to_string());
-
-        items.push(ParsedItem {
-            request_id,
-            message_id,
-            parent_uuid: raw.parent_uuid,
-            is_sidechain: raw.is_sidechain.unwrap_or(false),
-            occurred_at,
-            model,
-            service_tier,
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_creation_tokens,
-            metadata,
-        });
+        process_line(trimmed, &mut items, &mut stats, &mut seen, false);
     }
 
     items
@@ -171,6 +222,39 @@ pub fn parse_transcript_file(path: &Path) -> anyhow::Result<Vec<ParsedItem>> {
         .with_context(|| format!("failed to open transcript file: {}", path.display()))?;
     let reader = std::io::BufReader::new(file);
     Ok(parse_transcript_reader(reader))
+}
+
+pub fn parse_transcript_reader_with_stats<R: BufRead>(reader: R) -> TranscriptParseResult {
+    let mut items = Vec::new();
+    let mut stats = TokenStats::default();
+    let mut seen = HashSet::new();
+
+    // SINGLE PASS
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                log::warn!("I/O error reading transcript line: {e}");
+                continue;
+            }
+        };
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        process_line(trimmed, &mut items, &mut stats, &mut seen, true);
+    }
+
+    TranscriptParseResult { items, stats }
+}
+
+pub fn parse_transcript_file_with_stats(path: &Path) -> anyhow::Result<TranscriptParseResult> {
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open transcript file: {}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    Ok(parse_transcript_reader_with_stats(reader))
 }
 
 // ---------------------------------------------------------------------------
@@ -234,11 +318,16 @@ mod tests {
         get_logger().warnings.lock().unwrap().clear();
     }
 
-    // ----- Helper ----------------------------------------------------------
+    // ----- Helpers ----------------------------------------------------------
 
     fn parse_str(s: &str) -> Vec<ParsedItem> {
         init_logger();
         parse_transcript_reader(BufReader::new(s.as_bytes()))
+    }
+
+    fn parse_str_with_stats(s: &str) -> TranscriptParseResult {
+        init_logger();
+        parse_transcript_reader_with_stats(BufReader::new(s.as_bytes()))
     }
 
     const VALID_ASSISTANT: &str = r#"{"type":"assistant","requestId":"req_top","uuid":"u1","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg_inner","model":"claude-opus-4-7","usage":{"input_tokens":1,"output_tokens":2}}}"#;
@@ -418,6 +507,175 @@ mod tests {
         assert!(
             result.iter().any(|item| item.model.starts_with("claude-")),
             "expected at least one item with model starting with 'claude-'"
+        );
+    }
+
+    // =========================================================================
+    // Token stats tests
+    // =========================================================================
+
+    // Helper to build a JSONL line with given parameters
+    fn make_line(
+        req_id: &str,
+        msg_id: Option<&str>,
+        input: i64,
+        output: i64,
+        cache_creation: Option<i64>,
+        cache_read: Option<i64>,
+        is_sidechain: bool,
+    ) -> String {
+        let msg_id_field = match msg_id {
+            Some(id) => format!(r#""id":"{}","#, id),
+            None => String::new(),
+        };
+        let cache_creation_field = match cache_creation {
+            Some(v) => format!(r#","cache_creation_input_tokens":{}"#, v),
+            None => String::new(),
+        };
+        let cache_read_field = match cache_read {
+            Some(v) => format!(r#","cache_read_input_tokens":{}"#, v),
+            None => String::new(),
+        };
+        format!(
+            r#"{{"type":"assistant","requestId":"{req_id}","isSidechain":{is_sidechain},"uuid":"u1","timestamp":"2025-11-15T10:23:45.000Z","message":{{{msg_id_field}"model":"claude-opus-4-7","usage":{{"input_tokens":{input},"output_tokens":{output}{cache_creation_field}{cache_read_field}}}}}}}"#
+        )
+    }
+
+    fn make_line_empty_msg_id(
+        req_id: &str,
+        input: i64,
+        output: i64,
+    ) -> String {
+        format!(
+            r#"{{"type":"assistant","requestId":"{req_id}","uuid":"u1","timestamp":"2025-11-15T10:23:45.000Z","message":{{"id":"","model":"claude-opus-4-7","usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#
+        )
+    }
+
+    // 1. stats_dedup_message_request_pair: two identical lines (req=r1, msg=m1, in=10, out=20)
+    //    → items.len() == 2 AND stats counts only once
+    #[test]
+    fn stats_dedup_message_request_pair() {
+        let line = make_line("r1", Some("m1"), 10, 20, None, None, false);
+        let input = format!("{line}\n{line}");
+        let result = parse_str_with_stats(&input);
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(
+            result.stats,
+            TokenStats {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+            }
+        );
+    }
+
+    // 2. stats_no_dedup_when_message_id_missing
+    #[test]
+    fn stats_no_dedup_when_message_id_missing() {
+        let line = make_line("r1", None, 5, 7, None, None, false);
+        let input = format!("{line}\n{line}");
+        let result = parse_str_with_stats(&input);
+        assert_eq!(result.stats.input_tokens, 10);
+        assert_eq!(result.stats.output_tokens, 14);
+    }
+
+    // 3. stats_no_dedup_when_message_id_empty
+    #[test]
+    fn stats_no_dedup_when_message_id_empty() {
+        let line = make_line_empty_msg_id("r1", 5, 7);
+        let input = format!("{line}\n{line}");
+        let result = parse_str_with_stats(&input);
+        assert_eq!(result.stats.input_tokens, 10);
+        assert_eq!(result.stats.output_tokens, 14);
+    }
+
+    // 4. stats_cache_fields_sum_with_none_as_zero
+    #[test]
+    fn stats_cache_fields_sum_with_none_as_zero() {
+        let line_a = make_line("r1", Some("m1"), 1, 1, Some(100), Some(200), false);
+        let line_b = make_line("r2", Some("m2"), 1, 1, None, None, false);
+        let input = format!("{line_a}\n{line_b}");
+        let result = parse_str_with_stats(&input);
+        assert_eq!(result.stats.cache_creation_tokens, 100);
+        assert_eq!(result.stats.cache_read_tokens, 200);
+    }
+
+    // 5. stats_sidechain_counted
+    #[test]
+    fn stats_sidechain_counted() {
+        let line = make_line("r1", Some("m1"), 50, 60, None, None, true);
+        let result = parse_str_with_stats(&line);
+        assert_eq!(result.stats.input_tokens, 50);
+        assert_eq!(result.stats.output_tokens, 60);
+    }
+
+    // 6. stats_empty_reader
+    #[test]
+    fn stats_empty_reader() {
+        let result = parse_str_with_stats("");
+        assert!(result.items.is_empty());
+        assert_eq!(result.stats, TokenStats::default());
+    }
+
+    // 7. stats_mixed_with_malformed
+    #[test]
+    fn stats_mixed_with_malformed() {
+        let line_a = make_line("r1", Some("m1"), 1, 2, None, None, false);
+        let line_b = make_line("r2", Some("m2"), 3, 4, None, None, false);
+        let input = format!("{line_a}\n{{not json\n{line_b}");
+        let result = parse_str_with_stats(&input);
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(
+            result.stats,
+            TokenStats {
+                input_tokens: 4,
+                output_tokens: 6,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+            }
+        );
+    }
+
+    // 8. file_with_stats_two_valid
+    #[test]
+    fn file_with_stats_two_valid() {
+        let line_a = make_line("r1", Some("m1"), 5, 10, None, None, false);
+        let line_b = make_line("r2", Some("m2"), 3, 7, None, None, false);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_stats.jsonl");
+        std::fs::write(&path, format!("{line_a}\n{line_b}\n")).unwrap();
+        let result = parse_transcript_file_with_stats(&path);
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.stats.input_tokens, 8);
+        assert_eq!(result.stats.output_tokens, 17);
+    }
+
+    // 9. file_with_stats_nonexistent
+    #[test]
+    fn file_with_stats_nonexistent() {
+        let result = parse_transcript_file_with_stats(Path::new("/nonexistent/x.jsonl"));
+        assert!(result.is_err());
+    }
+
+    // 10. live_stats_spot_check_when_available (ENV-gated)
+    #[test]
+    fn live_stats_spot_check_when_available() {
+        let Ok(path_str) = std::env::var("TALLYTAPE_LIVE_TRANSCRIPT_STATS") else {
+            return;
+        };
+        let path = Path::new(&path_str);
+        let result = parse_transcript_file_with_stats(path)
+            .expect("parse_transcript_file_with_stats failed");
+        assert_eq!(
+            result.stats,
+            TokenStats {
+                input_tokens: 53,
+                output_tokens: 22471,
+                cache_creation_tokens: 174471,
+                cache_read_tokens: 1353319,
+            }
         );
     }
 }

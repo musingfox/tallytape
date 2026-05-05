@@ -20,4 +20,7 @@ mod transcript;
 pub use transcript::{slugify_cwd, transcript_path};
 
 mod transcript_parser;
-pub use transcript_parser::{parse_transcript_file, parse_transcript_reader, ParsedItem};
+pub use transcript_parser::{
+    parse_transcript_file, parse_transcript_file_with_stats, parse_transcript_reader,
+    parse_transcript_reader_with_stats, ParsedItem, TokenStats, TranscriptParseResult,
+};
