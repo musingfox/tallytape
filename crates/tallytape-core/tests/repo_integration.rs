@@ -42,6 +42,25 @@ mod helpers {
         .expect("make_session should succeed")
     }
 
+    /// Insert a session with a specific cwd via `SessionRepository::upsert` and return it.
+    pub fn make_session_with_cwd(
+        db: &Database,
+        source: &str,
+        cwd: &str,
+    ) -> tallytape_core::Session {
+        let repo = SessionRepository::new(db.clone());
+        let n = next_id();
+        repo.upsert(NewSession {
+            source: source.to_string(),
+            external_id: format!("ext-{n}"),
+            cwd: Some(cwd.to_string()),
+            started_at: 1_714_867_200,
+            ended_at: None,
+            metadata: None,
+        })
+        .expect("make_session_with_cwd should succeed")
+    }
+
     /// Build a `NewItemDraft` with customisable token/cost values.
     /// `occurred_at` is a unix timestamp (i64).
     pub fn make_draft(
@@ -513,6 +532,144 @@ mod view_totals {
         assert!(
             (total_cost - 0.15f64).abs() < 1e-9,
             "total_cost should still be 0.15, got {total_cost}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mod merge_scenarios
+// ---------------------------------------------------------------------------
+mod merge_scenarios {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    /// C13 — Items from multiple sessions × cwds × local-days collapse correctly
+    /// on `(cwd, local_date)`. Receipt count, item counts per receipt, and
+    /// `v_receipt_totals` aggregates are all verified in a single combined test.
+    #[test]
+    fn combined_merge_scenarios() {
+        let db = open_db();
+
+        // Three sessions: s_a and s_c share /proj-a, s_b is on /proj-b.
+        let s_a = make_session_with_cwd(&db, "claude", "/proj-a");
+        let s_b = make_session_with_cwd(&db, "claude", "/proj-b");
+        let s_c = make_session_with_cwd(&db, "claude", "/proj-a");
+
+        // D1 = 2024-05-05 00:00:00 UTC; D2 is two days later (guarantees distinct local dates).
+        let d1: i64 = 1_714_867_200;
+        let d2: i64 = d1 + 86_400 * 2;
+
+        // Derive expected date strings from SQLite (TZ-safe).
+        let (date_d1, date_d2): (String, String) = {
+            let conn = db.lock();
+            let s1: String = conn
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![d1],
+                    |r| r.get(0),
+                )
+                .expect("date_d1 query should succeed");
+            let s2: String = conn
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![d2],
+                    |r| r.get(0),
+                )
+                .expect("date_d2 query should succeed");
+            (s1, s2)
+        };
+        assert_ne!(date_d1, date_d2, "D1 and D2 must map to different local dates");
+
+        // Five merge_item calls covering 3 receipts.
+        merge_item(&db, s_a.id, make_draft("req-1", d1, 10, 20, 0.10))
+            .expect("merge req-1 should succeed");
+        merge_item(&db, s_a.id, make_draft("req-2", d1, 5, 7, 0.05))
+            .expect("merge req-2 should succeed");
+        // Different session, same cwd and day — should land in the same receipt.
+        merge_item(&db, s_c.id, make_draft("req-3", d1, 3, 4, 0.02))
+            .expect("merge req-3 should succeed");
+        // Same cwd as s_a, but a different day — a new receipt.
+        merge_item(&db, s_a.id, make_draft("req-4", d2, 8, 9, 0.08))
+            .expect("merge req-4 should succeed");
+        // Different cwd, same day as D1 — another new receipt.
+        merge_item(&db, s_b.id, make_draft("req-5", d1, 1, 2, 0.01))
+            .expect("merge req-5 should succeed");
+
+        // ---- Receipt count ----
+        let receipt_repo = ReceiptRepository::new(db.clone());
+        let receipts = receipt_repo.list().expect("list should succeed");
+        assert_eq!(receipts.len(), 3, "expected exactly 3 receipts");
+
+        // Index receipts by (cwd, date) for keyed assertions.
+        let mut receipt_map: HashMap<(String, String), tallytape_core::Receipt> = HashMap::new();
+        for r in receipts {
+            receipt_map.insert((r.cwd.clone(), r.date.clone()), r);
+        }
+
+        // ---- (/proj-a, D1): 3 items, in=18, out=31, cost=0.17 ----
+        let key_a_d1 = ("/proj-a".to_string(), date_d1.clone());
+        let r_a_d1 = receipt_map
+            .get(&key_a_d1)
+            .expect("receipt (/proj-a, date_d1) must exist");
+
+        let item_repo = ItemRepository::new(db.clone());
+        let items_a_d1 = item_repo
+            .list_by_receipt(r_a_d1.id)
+            .expect("list_by_receipt (/proj-a, D1)");
+        assert_eq!(items_a_d1.len(), 3, "(/proj-a, D1) should have 3 items");
+
+        let (in_a_d1, out_a_d1, cost_a_d1) = read_view_totals(&db, r_a_d1.id);
+        assert_eq!(in_a_d1, 18, "(/proj-a, D1) input total should be 10+5+3=18");
+        assert_eq!(out_a_d1, 31, "(/proj-a, D1) output total should be 20+7+4=31");
+        assert!(
+            (cost_a_d1 - 0.17f64).abs() < 1e-9,
+            "(/proj-a, D1) cost should be 0.10+0.05+0.02=0.17, got {cost_a_d1}"
+        );
+
+        // First-write-wins: the receipt's session_id should be s_a (req-1 was written first).
+        assert_eq!(
+            r_a_d1.session_id,
+            Some(s_a.id),
+            "(/proj-a, D1) session_id should be s_a (first-write-wins)"
+        );
+
+        // ---- (/proj-a, D2): 1 item, in=8, out=9, cost=0.08 ----
+        let key_a_d2 = ("/proj-a".to_string(), date_d2.clone());
+        let r_a_d2 = receipt_map
+            .get(&key_a_d2)
+            .expect("receipt (/proj-a, date_d2) must exist");
+
+        let items_a_d2 = item_repo
+            .list_by_receipt(r_a_d2.id)
+            .expect("list_by_receipt (/proj-a, D2)");
+        assert_eq!(items_a_d2.len(), 1, "(/proj-a, D2) should have 1 item");
+
+        let (in_a_d2, out_a_d2, cost_a_d2) = read_view_totals(&db, r_a_d2.id);
+        assert_eq!(in_a_d2, 8, "(/proj-a, D2) input total should be 8");
+        assert_eq!(out_a_d2, 9, "(/proj-a, D2) output total should be 9");
+        assert!(
+            (cost_a_d2 - 0.08f64).abs() < 1e-9,
+            "(/proj-a, D2) cost should be 0.08, got {cost_a_d2}"
+        );
+
+        // ---- (/proj-b, D1): 1 item, in=1, out=2, cost=0.01 ----
+        let key_b_d1 = ("/proj-b".to_string(), date_d1.clone());
+        let r_b_d1 = receipt_map
+            .get(&key_b_d1)
+            .expect("receipt (/proj-b, date_d1) must exist");
+
+        let items_b_d1 = item_repo
+            .list_by_receipt(r_b_d1.id)
+            .expect("list_by_receipt (/proj-b, D1)");
+        assert_eq!(items_b_d1.len(), 1, "(/proj-b, D1) should have 1 item");
+
+        let (in_b_d1, out_b_d1, cost_b_d1) = read_view_totals(&db, r_b_d1.id);
+        assert_eq!(in_b_d1, 1, "(/proj-b, D1) input total should be 1");
+        assert_eq!(out_b_d1, 2, "(/proj-b, D1) output total should be 2");
+        assert!(
+            (cost_b_d1 - 0.01f64).abs() < 1e-9,
+            "(/proj-b, D1) cost should be 0.01, got {cost_b_d1}"
         );
     }
 }
