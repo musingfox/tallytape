@@ -15,3 +15,6 @@ pub use merge::{merge_item, NewItemDraft};
 
 mod discovery;
 pub use discovery::*;
+
+mod transcript;
+pub use transcript::{slugify_cwd, transcript_path};
