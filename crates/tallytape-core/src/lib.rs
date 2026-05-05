@@ -25,6 +25,9 @@ pub use pricing::{lookup_pricing, PricingEntry};
 mod cost;
 pub use cost::{calculate_cost, calculate_stats_cost};
 
+mod flush;
+pub use flush::wait_for_flush;
+
 mod transcript_parser;
 pub use transcript_parser::{
     parse_transcript_file, parse_transcript_file_with_stats, parse_transcript_reader,
