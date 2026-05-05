@@ -18,3 +18,6 @@ pub use discovery::*;
 
 mod transcript;
 pub use transcript::{slugify_cwd, transcript_path};
+
+mod transcript_parser;
+pub use transcript_parser::{parse_transcript_file, parse_transcript_reader, ParsedItem};

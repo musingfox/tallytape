@@ -3409,6 +3409,8 @@ name = "tallytape-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
+ "log",
  "rusqlite",
  "rusqlite_migration",
  "serde",
