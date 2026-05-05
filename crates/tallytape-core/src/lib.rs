@@ -12,3 +12,6 @@ pub use session::{NewSession, Session, SessionRepository};
 
 pub mod merge;
 pub use merge::{merge_item, NewItemDraft};
+
+mod discovery;
+pub use discovery::*;
