@@ -19,6 +19,9 @@ pub use discovery::*;
 mod transcript;
 pub use transcript::{slugify_cwd, transcript_path};
 
+mod pricing;
+pub use pricing::{lookup_pricing, PricingEntry};
+
 mod transcript_parser;
 pub use transcript_parser::{
     parse_transcript_file, parse_transcript_file_with_stats, parse_transcript_reader,
