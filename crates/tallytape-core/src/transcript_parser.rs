@@ -501,7 +501,7 @@ mod tests {
         let path = Path::new(&path_str);
         let result = parse_transcript_file(path).expect("parse_transcript_file failed");
         assert!(
-            result.len() >= 1,
+            !result.is_empty(),
             "expected at least 1 ParsedItem from live transcript"
         );
         assert!(
