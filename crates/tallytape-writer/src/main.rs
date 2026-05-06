@@ -78,8 +78,27 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::InstallHook => {
-            eprintln!("install-hook: not implemented yet (see p2-6)");
-            ExitCode::FAILURE
+            let exe = match std::env::current_exe() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("install-hook: failed to resolve current executable: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let snippet = serde_json::json!({
+                "hooks": {
+                    "SessionEnd": [
+                        {
+                            "matcher": "",
+                            "hooks": [
+                                { "type": "command", "command": exe.to_string_lossy() }
+                            ]
+                        }
+                    ]
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&snippet).expect("static json! value always serializes"));
+            ExitCode::SUCCESS
         }
     }
 }
