@@ -301,15 +301,24 @@ mod tests {
         ];
 
         for (model_id, [input, output, creation, read]) in expected {
-            let entry = lookup_pricing(model_id)
-                .unwrap_or_else(|| panic!("missing entry for {model_id}"));
-            assert_eq!(entry.input_per_million, *input, "input mismatch for {model_id}");
-            assert_eq!(entry.output_per_million, *output, "output mismatch for {model_id}");
+            let entry =
+                lookup_pricing(model_id).unwrap_or_else(|| panic!("missing entry for {model_id}"));
+            assert_eq!(
+                entry.input_per_million, *input,
+                "input mismatch for {model_id}"
+            );
+            assert_eq!(
+                entry.output_per_million, *output,
+                "output mismatch for {model_id}"
+            );
             assert_eq!(
                 entry.cache_creation_per_million, *creation,
                 "cache_creation mismatch for {model_id}"
             );
-            assert_eq!(entry.cache_read_per_million, *read, "cache_read mismatch for {model_id}");
+            assert_eq!(
+                entry.cache_read_per_million, *read,
+                "cache_read mismatch for {model_id}"
+            );
         }
     }
 

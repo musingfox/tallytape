@@ -222,9 +222,7 @@ mod tests {
 
         // PRAGMA index_list returns one row per index; check that at least one
         // unique index exists on the receipts table.
-        let mut stmt = conn
-            .prepare("PRAGMA index_list('receipts')")
-            .unwrap();
+        let mut stmt = conn.prepare("PRAGMA index_list('receipts')").unwrap();
         // Columns: seq, name, unique, origin, partial
         let unique_count: i64 = stmt
             .query_map([], |r| {

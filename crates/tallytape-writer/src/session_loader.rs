@@ -69,7 +69,10 @@ pub fn load_session(payload: &HookPayload, claude_home: &Path) -> SessionResult 
             stats: parsed.stats,
         },
         Err(e) => {
-            log::warn!("parse_transcript_file_with_stats({}) failed: {e}", path.display());
+            log::warn!(
+                "parse_transcript_file_with_stats({}) failed: {e}",
+                path.display()
+            );
             SessionResult {
                 session,
                 items: Vec::new(),
@@ -176,7 +179,10 @@ mod tests {
         assert_eq!(result.session.external_id, sid);
         assert_eq!(result.session.cwd.as_deref(), Some(cwd));
         assert_eq!(result.session.source, SOURCE);
-        assert!(result.session.started_at > 0, "fallback started_at uses now()");
+        assert!(
+            result.session.started_at > 0,
+            "fallback started_at uses now()"
+        );
         assert!(result.items.is_empty());
     }
 

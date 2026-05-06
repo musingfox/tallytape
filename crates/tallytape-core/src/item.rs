@@ -439,7 +439,10 @@ mod tests {
         assert!(first.is_ok(), "first insert should succeed");
 
         let second = repo.insert(&new);
-        assert!(second.is_err(), "duplicate (source, request_id) must return Err");
+        assert!(
+            second.is_err(),
+            "duplicate (source, request_id) must return Err"
+        );
 
         let conn = db.lock();
         let count: i64 = conn

@@ -395,7 +395,11 @@ mod tests {
         assert_eq!(items.len(), 2, "expected 2 valid items");
 
         let warnings = captured_warnings();
-        assert_eq!(warnings.len(), 1, "expected exactly 1 warning, got: {warnings:?}");
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly 1 warning, got: {warnings:?}"
+        );
     }
 
     // ----- C7: unknown top-level types skipped silently -------------------
@@ -417,7 +421,11 @@ mod tests {
         assert_eq!(items.len(), 1);
 
         let warnings = captured_warnings();
-        assert_eq!(warnings.len(), 0, "expected zero warnings, got: {warnings:?}");
+        assert_eq!(
+            warnings.len(),
+            0,
+            "expected zero warnings, got: {warnings:?}"
+        );
     }
 
     // ----- C8: requestId fallback to uuid ---------------------------------
@@ -459,7 +467,11 @@ mod tests {
         assert_eq!(items.len(), 2);
 
         let warnings = captured_warnings();
-        assert_eq!(warnings.len(), 0, "expected zero warnings for blank lines, got: {warnings:?}");
+        assert_eq!(
+            warnings.len(),
+            0,
+            "expected zero warnings for blank lines, got: {warnings:?}"
+        );
     }
 
     // ----- C11: timestamp ISO8601 → unix seconds --------------------------
@@ -541,11 +553,7 @@ mod tests {
         )
     }
 
-    fn make_line_empty_msg_id(
-        req_id: &str,
-        input: i64,
-        output: i64,
-    ) -> String {
+    fn make_line_empty_msg_id(req_id: &str, input: i64, output: i64) -> String {
         format!(
             r#"{{"type":"assistant","requestId":"{req_id}","uuid":"u1","timestamp":"2025-11-15T10:23:45.000Z","message":{{"id":"","model":"claude-opus-4-7","usage":{{"input_tokens":{input},"output_tokens":{output}}}}}}}"#
         )

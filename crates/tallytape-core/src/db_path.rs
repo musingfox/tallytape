@@ -25,7 +25,10 @@ mod tests {
     #[test]
     fn returns_path_ending_in_sqlite_file() {
         let path = db_path().expect("db_path should resolve");
-        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("tallytape.sqlite"));
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("tallytape.sqlite")
+        );
         let parent = path.parent().expect("path has parent");
         assert!(parent.exists(), "parent dir should be created");
         assert!(parent.is_dir());
@@ -44,7 +47,10 @@ mod tests {
     #[test]
     fn log_path_returns_writer_log_filename() {
         let path = log_path().expect("log_path should resolve");
-        assert_eq!(path.file_name().and_then(|s| s.to_str()), Some("writer.log"));
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("writer.log")
+        );
     }
 
     #[test]

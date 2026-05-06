@@ -10,9 +10,15 @@ pub struct HookPayload {
     pub transcript_path: Option<String>,
 }
 
-pub fn parse_payload<R: Read>(mut reader: R) -> anyhow::Result<HookPayload> {
+const MAX_PAYLOAD_BYTES: u64 = 1 << 20; // 1 MiB
+
+pub fn parse_payload<R: Read>(reader: R) -> anyhow::Result<HookPayload> {
     let mut buf = String::new();
-    reader.read_to_string(&mut buf)?;
+    let mut limited = reader.take(MAX_PAYLOAD_BYTES + 1);
+    limited.read_to_string(&mut buf)?;
+    if buf.len() as u64 > MAX_PAYLOAD_BYTES {
+        anyhow::bail!("hook payload exceeds 1 MiB limit");
+    }
     let trimmed = buf.trim();
     if trimmed.is_empty() {
         anyhow::bail!("empty stdin: expected hook payload JSON");
@@ -97,5 +103,17 @@ mod tests {
     fn rejects_malformed_json() {
         let err = parse_payload(b"{not json".as_slice()).unwrap_err();
         assert!(err.to_string().contains("malformed"));
+    }
+
+    #[test]
+    fn rejects_payload_exceeding_1_mib() {
+        // Build a payload just over 1 MiB. We use a byte vec of repeated 'x'
+        // characters — it won't be valid JSON, but the size check fires first.
+        let oversized = vec![b'x'; (1 << 20) + 1];
+        let err = parse_payload(oversized.as_slice()).unwrap_err();
+        assert!(
+            err.to_string().contains("1 MiB"),
+            "expected 1 MiB error, got: {err}"
+        );
     }
 }

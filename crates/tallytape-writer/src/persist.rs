@@ -25,7 +25,10 @@ pub fn persist(result: SessionResult) -> anyhow::Result<PersistOutcome> {
 
 /// Core persist logic. Accepts an already-opened `Database` so tests can
 /// inject a temp-dir database without touching the real user data directory.
-pub(crate) fn persist_with_db(db: &Database, result: SessionResult) -> anyhow::Result<PersistOutcome> {
+pub(crate) fn persist_with_db(
+    db: &Database,
+    result: SessionResult,
+) -> anyhow::Result<PersistOutcome> {
     let session = SessionRepository::new(db.clone()).upsert(result.session)?;
     let session_id = session.id;
     log::debug!(
@@ -85,13 +88,13 @@ pub(crate) fn persist_with_db(db: &Database, result: SessionResult) -> anyhow::R
             }
             Err(e) => {
                 if is_unique_constraint_violation(&e) {
-                    log::debug!(
-                        "duplicate request_id {:?} — skipping",
-                        item.request_id
-                    );
+                    log::debug!("duplicate request_id {:?} — skipping", item.request_id);
                     skipped_duplicates += 1;
                 } else {
-                    log::warn!("merge_item failed for request_id {:?}: {e}", item.request_id);
+                    log::warn!(
+                        "merge_item failed for request_id {:?}: {e}",
+                        item.request_id
+                    );
                     // Continue processing remaining items.
                 }
             }
@@ -108,8 +111,7 @@ pub(crate) fn persist_with_db(db: &Database, result: SessionResult) -> anyhow::R
 
 /// Return `true` if `err` wraps a SQLite UNIQUE constraint violation.
 fn is_unique_constraint_violation(err: &anyhow::Error) -> bool {
-    if let Some(rusqlite::Error::SqliteFailure(ffi_err, _)) =
-        err.downcast_ref::<rusqlite::Error>()
+    if let Some(rusqlite::Error::SqliteFailure(ffi_err, _)) = err.downcast_ref::<rusqlite::Error>()
     {
         return ffi_err.code == rusqlite::ErrorCode::ConstraintViolation;
     }
@@ -244,9 +246,16 @@ mod tests {
         // Verify cost is 0.0 in DB
         let conn = db.lock();
         let cost: f64 = conn
-            .query_row("SELECT cost FROM items WHERE request_id = 'req-unk'", [], |r| r.get(0))
+            .query_row(
+                "SELECT cost FROM items WHERE request_id = 'req-unk'",
+                [],
+                |r| r.get(0),
+            )
             .expect("item must exist");
-        assert!((cost - 0.0).abs() < f64::EPSILON, "cost must be 0.0, got {cost}");
+        assert!(
+            (cost - 0.0).abs() < f64::EPSILON,
+            "cost must be 0.0, got {cost}"
+        );
     }
 
     // Test 4: empty items → session row inserted, no items

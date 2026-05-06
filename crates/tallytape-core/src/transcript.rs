@@ -14,7 +14,13 @@ use std::path::{Path, PathBuf};
 /// - `/Users/alice/Mobile Documents` → `-Users-alice-Mobile-Documents`
 pub fn slugify_cwd(cwd: &str) -> String {
     cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -42,8 +48,14 @@ mod tests {
 
     #[test]
     fn slug_dot_becomes_dash_no_collapse() {
-        assert_eq!(slugify_cwd("/Users/nickhuang/.config"), "-Users-nickhuang--config");
-        assert_eq!(slugify_cwd("/Users/nickhuang/.claude"), "-Users-nickhuang--claude");
+        assert_eq!(
+            slugify_cwd("/Users/nickhuang/.config"),
+            "-Users-nickhuang--config"
+        );
+        assert_eq!(
+            slugify_cwd("/Users/nickhuang/.claude"),
+            "-Users-nickhuang--claude"
+        );
     }
 
     #[test]
@@ -117,18 +129,26 @@ mod tests {
     #[test]
     fn matches_live_filesystem_when_available() {
         use std::fs;
-        let Some(home) = std::env::var_os("HOME") else { return };
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
         let claude_home = PathBuf::from(home).join(".claude");
         let sessions_dir = claude_home.join("sessions");
-        let Ok(entries) = fs::read_dir(&sessions_dir) else { return };
+        let Ok(entries) = fs::read_dir(&sessions_dir) else {
+            return;
+        };
 
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
-            let Ok(raw) = fs::read_to_string(&path) else { continue };
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+            let Ok(raw) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
             let (Some(cwd), Some(sid)) = (
                 v.get("cwd").and_then(|x| x.as_str()),
                 v.get("sessionId").and_then(|x| x.as_str()),

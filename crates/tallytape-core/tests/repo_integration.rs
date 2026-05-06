@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use tallytape_core::{
-    Database, ItemRepository, NewItem, NewItemDraft, NewSession, ReceiptRepository,
-    SessionRepository, merge_item,
+    merge_item, Database, ItemRepository, NewItem, NewItemDraft, NewSession, ReceiptRepository,
+    SessionRepository,
 };
 
 // ---------------------------------------------------------------------------
@@ -97,7 +97,13 @@ mod helpers {
             "SELECT total_input_tokens, total_output_tokens, total_cost \
              FROM v_receipt_totals WHERE receipt_id = ?1",
             rusqlite::params![receipt_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?)),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            },
         )
         .expect("v_receipt_totals row should exist for receipt_id")
     }
@@ -140,7 +146,10 @@ mod fk_behavior {
             .expect("find_by_id should not error")
             .expect("receipt should still exist");
 
-        assert_eq!(found.session_id, None, "session_id should be NULL after session delete");
+        assert_eq!(
+            found.session_id, None,
+            "session_id should be NULL after session delete"
+        );
     }
 
     /// C2 — Deleting a receipt cascades to its items.
@@ -150,19 +159,11 @@ mod fk_behavior {
         let session = make_session(&db, "claude");
         let ts = 1_746_403_200i64;
 
-        let item1 = merge_item(
-            &db,
-            session.id,
-            make_draft("req-c2a", ts, 10, 20, 0.01),
-        )
-        .expect("first merge_item should succeed");
+        let item1 = merge_item(&db, session.id, make_draft("req-c2a", ts, 10, 20, 0.01))
+            .expect("first merge_item should succeed");
 
-        merge_item(
-            &db,
-            session.id,
-            make_draft("req-c2b", ts, 5, 7, 0.005),
-        )
-        .expect("second merge_item should succeed");
+        merge_item(&db, session.id, make_draft("req-c2b", ts, 5, 7, 0.005))
+            .expect("second merge_item should succeed");
 
         let receipt_id = item1.receipt_id;
 
@@ -198,12 +199,8 @@ mod fk_behavior {
         let session = make_session(&db, "claude");
         let ts = 1_746_403_200i64;
 
-        merge_item(
-            &db,
-            session.id,
-            make_draft("req-c3", ts, 10, 20, 0.01),
-        )
-        .expect("merge_item should succeed");
+        merge_item(&db, session.id, make_draft("req-c3", ts, 10, 20, 0.01))
+            .expect("merge_item should succeed");
 
         // Attempt to delete the session — items have FK items.session_id → sessions.id
         // which should restrict the delete.
@@ -215,13 +212,19 @@ mod fk_behavior {
             )
         };
 
-        assert!(result.is_err(), "DELETE session with referencing items must fail");
+        assert!(
+            result.is_err(),
+            "DELETE session with referencing items must fail"
+        );
 
         // Session should still exist
         let found = SessionRepository::new(db.clone())
             .find_by_id(session.id)
             .expect("find_by_id should not error");
-        assert!(found.is_some(), "session should still exist after failed delete");
+        assert!(
+            found.is_some(),
+            "session should still exist after failed delete"
+        );
     }
 }
 
@@ -252,7 +255,9 @@ mod ordering {
 
         let receipt_id = item_a.receipt_id;
         let item_repo = ItemRepository::new(db.clone());
-        let items = item_repo.list_by_receipt(receipt_id).expect("list_by_receipt");
+        let items = item_repo
+            .list_by_receipt(receipt_id)
+            .expect("list_by_receipt");
 
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].occurred_at, t01, "first item should be 01:00");
@@ -275,9 +280,15 @@ mod ordering {
         let t2 = 1_777_680_000i64; // 2026-05-02T00:00:00Z
         let t3 = 1_777_766_400i64; // 2026-05-03T00:00:00Z
 
-        receipt_repo.upsert_by_cwd_date(Some(session.id), "/proj", t1).expect("upsert t1");
-        receipt_repo.upsert_by_cwd_date(Some(session.id), "/proj", t2).expect("upsert t2");
-        receipt_repo.upsert_by_cwd_date(Some(session.id), "/proj", t3).expect("upsert t3");
+        receipt_repo
+            .upsert_by_cwd_date(Some(session.id), "/proj", t1)
+            .expect("upsert t1");
+        receipt_repo
+            .upsert_by_cwd_date(Some(session.id), "/proj", t2)
+            .expect("upsert t2");
+        receipt_repo
+            .upsert_by_cwd_date(Some(session.id), "/proj", t3)
+            .expect("upsert t3");
 
         let receipts = receipt_repo.list().expect("list should succeed");
 
@@ -312,19 +323,35 @@ mod ordering {
         let t_may03 = 1_777_766_400i64; // 2026-05-03T00:00:00Z
         let t_may04 = 1_777_852_800i64; // 2026-05-04T00:00:00Z
 
-        receipt_repo.upsert_by_cwd_date(Some(session.id), "/proj", t_apr30).expect("upsert apr30");
-        receipt_repo.upsert_by_cwd_date(Some(session.id), "/proj", t_may01).expect("upsert may01");
-        receipt_repo.upsert_by_cwd_date(Some(session.id), "/proj", t_may03).expect("upsert may03");
-        receipt_repo.upsert_by_cwd_date(Some(session.id), "/proj", t_may04).expect("upsert may04");
+        receipt_repo
+            .upsert_by_cwd_date(Some(session.id), "/proj", t_apr30)
+            .expect("upsert apr30");
+        receipt_repo
+            .upsert_by_cwd_date(Some(session.id), "/proj", t_may01)
+            .expect("upsert may01");
+        receipt_repo
+            .upsert_by_cwd_date(Some(session.id), "/proj", t_may03)
+            .expect("upsert may03");
+        receipt_repo
+            .upsert_by_cwd_date(Some(session.id), "/proj", t_may04)
+            .expect("upsert may04");
 
         // Use SQLite to get the actual date strings for the bounds, to avoid timezone issues
         let (d_may01, d_may03): (String, String) = {
             let conn = db.lock();
             let d1: String = conn
-                .query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t_may01], |r| r.get(0))
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![t_may01],
+                    |r| r.get(0),
+                )
                 .unwrap();
             let d3: String = conn
-                .query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t_may03], |r| r.get(0))
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![t_may03],
+                    |r| r.get(0),
+                )
                 .unwrap();
             (d1, d3)
         };
@@ -333,7 +360,11 @@ mod ordering {
             .list_by_date_range(&d_may01, &d_may03)
             .expect("list_by_date_range should succeed");
 
-        assert_eq!(results.len(), 2, "should return 2 receipts in range [{d_may01}, {d_may03}]");
+        assert_eq!(
+            results.len(),
+            2,
+            "should return 2 receipts in range [{d_may01}, {d_may03}]"
+        );
         // id DESC means may03 comes before may01
         assert_eq!(results[0].date, d_may03, "first result should be may03");
         assert_eq!(results[1].date, d_may01, "second result should be may01");
@@ -360,7 +391,10 @@ mod uniqueness {
             .upsert_by_cwd_date(None, "/proj", ts)
             .expect("second upsert");
 
-        assert_eq!(r1.id, r2.id, "both upserts should return the same receipt id");
+        assert_eq!(
+            r1.id, r2.id,
+            "both upserts should return the same receipt id"
+        );
 
         let all = receipt_repo.list().expect("list");
         assert_eq!(all.len(), 1, "only one receipt should exist");
@@ -400,7 +434,9 @@ mod uniqueness {
         };
 
         // First insert succeeds
-        item_repo.insert(&new_item).expect("first insert should succeed");
+        item_repo
+            .insert(&new_item)
+            .expect("first insert should succeed");
 
         // Second insert with same (source, request_id) but different occurred_at must fail
         let duplicate = NewItem {
@@ -408,9 +444,14 @@ mod uniqueness {
             ..new_item.clone()
         };
         let result = item_repo.insert(&duplicate);
-        assert!(result.is_err(), "duplicate (source, request_id) must return Err");
+        assert!(
+            result.is_err(),
+            "duplicate (source, request_id) must return Err"
+        );
 
-        let items = item_repo.list_by_receipt(receipt.id).expect("list_by_receipt");
+        let items = item_repo
+            .list_by_receipt(receipt.id)
+            .expect("list_by_receipt");
         assert_eq!(items.len(), 1, "exactly one item row should exist");
     }
 
@@ -444,13 +485,19 @@ mod uniqueness {
             })
             .expect("second upsert");
 
-        assert_eq!(s1.id, s2.id, "both upserts should return the same session id");
+        assert_eq!(
+            s1.id, s2.id,
+            "both upserts should return the same session id"
+        );
 
         let found = repo
             .find_by_source_and_external_id("claude", &ext_id)
             .expect("find should not error")
             .expect("session should exist");
-        assert_eq!(found.id, s1.id, "find_by_source_and_external_id should return same id");
+        assert_eq!(
+            found.id, s1.id,
+            "find_by_source_and_external_id should return same id"
+        );
     }
 }
 
@@ -467,19 +514,11 @@ mod view_totals {
         let session = make_session(&db, "claude");
         let ts = 1_746_403_200i64;
 
-        let item1 = merge_item(
-            &db,
-            session.id,
-            make_draft("req-c10a", ts, 10, 20, 0.10),
-        )
-        .expect("merge item1");
+        let item1 = merge_item(&db, session.id, make_draft("req-c10a", ts, 10, 20, 0.10))
+            .expect("merge item1");
 
-        merge_item(
-            &db,
-            session.id,
-            make_draft("req-c10b", ts + 60, 5, 7, 0.05),
-        )
-        .expect("merge item2");
+        merge_item(&db, session.id, make_draft("req-c10b", ts + 60, 5, 7, 0.05))
+            .expect("merge item2");
 
         let receipt_id = item1.receipt_id;
         let (total_in, total_out, total_cost) = read_view_totals(&db, receipt_id);
@@ -499,19 +538,11 @@ mod view_totals {
         let session = make_session(&db, "claude");
         let ts = 1_746_403_200i64;
 
-        let item1 = merge_item(
-            &db,
-            session.id,
-            make_draft("req-c11a", ts, 10, 20, 0.10),
-        )
-        .expect("merge item1");
+        let item1 = merge_item(&db, session.id, make_draft("req-c11a", ts, 10, 20, 0.10))
+            .expect("merge item1");
 
-        merge_item(
-            &db,
-            session.id,
-            make_draft("req-c11b", ts + 60, 5, 7, 0.05),
-        )
-        .expect("merge item2");
+        merge_item(&db, session.id, make_draft("req-c11b", ts + 60, 5, 7, 0.05))
+            .expect("merge item2");
 
         let receipt_id = item1.receipt_id;
 
@@ -579,7 +610,10 @@ mod merge_scenarios {
                 .expect("date_d2 query should succeed");
             (s1, s2)
         };
-        assert_ne!(date_d1, date_d2, "D1 and D2 must map to different local dates");
+        assert_ne!(
+            date_d1, date_d2,
+            "D1 and D2 must map to different local dates"
+        );
 
         // Five merge_item calls covering 3 receipts.
         merge_item(&db, s_a.id, make_draft("req-1", d1, 10, 20, 0.10))
@@ -621,7 +655,10 @@ mod merge_scenarios {
 
         let (in_a_d1, out_a_d1, cost_a_d1) = read_view_totals(&db, r_a_d1.id);
         assert_eq!(in_a_d1, 18, "(/proj-a, D1) input total should be 10+5+3=18");
-        assert_eq!(out_a_d1, 31, "(/proj-a, D1) output total should be 20+7+4=31");
+        assert_eq!(
+            out_a_d1, 31,
+            "(/proj-a, D1) output total should be 20+7+4=31"
+        );
         assert!(
             (cost_a_d1 - 0.17f64).abs() < 1e-9,
             "(/proj-a, D1) cost should be 0.10+0.05+0.02=0.17, got {cost_a_d1}"
@@ -689,12 +726,8 @@ mod triggers {
         let ts = 1_746_403_200i64;
 
         // First merge
-        let item1 = merge_item(
-            &db,
-            session.id,
-            make_draft("req-c12a", ts, 10, 20, 0.01),
-        )
-        .expect("first merge_item");
+        let item1 = merge_item(&db, session.id, make_draft("req-c12a", ts, 10, 20, 0.01))
+            .expect("first merge_item");
 
         let receipt_id = item1.receipt_id;
         let receipt_repo = ReceiptRepository::new(db.clone());

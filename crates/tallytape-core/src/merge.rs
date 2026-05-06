@@ -127,7 +127,8 @@ mod tests {
         let t = 1_714_867_200i64;
         let sid = insert_session(&db, Some("/a"), t);
 
-        let item = merge_item(&db, sid, make_draft(t, "req-ac1")).expect("merge_item should succeed");
+        let item =
+            merge_item(&db, sid, make_draft(t, "req-ac1")).expect("merge_item should succeed");
 
         assert_eq!(item.receipt_id, 1);
         assert_eq!(count_receipts(&db), 1);
@@ -140,10 +141,15 @@ mod tests {
         let t = 1_714_867_200i64;
         let sid = insert_session(&db, Some("/a"), t);
 
-        let item1 = merge_item(&db, sid, make_draft(t, "req-ac2a")).expect("first merge_item should succeed");
-        let item2 = merge_item(&db, sid, make_draft(t + 3600, "req-ac2b")).expect("second merge_item should succeed");
+        let item1 = merge_item(&db, sid, make_draft(t, "req-ac2a"))
+            .expect("first merge_item should succeed");
+        let item2 = merge_item(&db, sid, make_draft(t + 3600, "req-ac2b"))
+            .expect("second merge_item should succeed");
 
-        assert_eq!(item1.receipt_id, item2.receipt_id, "same receipt for same day");
+        assert_eq!(
+            item1.receipt_id, item2.receipt_id,
+            "same receipt for same day"
+        );
         assert_eq!(count_receipts(&db), 1);
         assert_eq!(count_items(&db), 2);
     }
@@ -156,10 +162,15 @@ mod tests {
         let sid1 = insert_session(&db, Some("/a"), t);
         let sid2 = insert_session(&db, Some("/b"), t);
 
-        let item1 = merge_item(&db, sid1, make_draft(t, "req-ac3a")).expect("first merge_item should succeed");
-        let item2 = merge_item(&db, sid2, make_draft(t, "req-ac3b")).expect("second merge_item should succeed");
+        let item1 = merge_item(&db, sid1, make_draft(t, "req-ac3a"))
+            .expect("first merge_item should succeed");
+        let item2 = merge_item(&db, sid2, make_draft(t, "req-ac3b"))
+            .expect("second merge_item should succeed");
 
-        assert_ne!(item1.receipt_id, item2.receipt_id, "different cwd → different receipt");
+        assert_ne!(
+            item1.receipt_id, item2.receipt_id,
+            "different cwd → different receipt"
+        );
         assert_eq!(count_receipts(&db), 2);
     }
 
@@ -180,10 +191,18 @@ mod tests {
         let (d1, d2) = {
             let conn = db.lock();
             let d1: String = conn
-                .query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t1], |r| r.get(0))
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![t1],
+                    |r| r.get(0),
+                )
                 .unwrap();
             let d2: String = conn
-                .query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t2], |r| r.get(0))
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![t2],
+                    |r| r.get(0),
+                )
                 .unwrap();
             (d1, d2)
         };
@@ -201,8 +220,10 @@ mod tests {
         }
 
         let sid = insert_session(&db, Some("/tz"), t1);
-        let item1 = merge_item(&db, sid, make_draft(t1, "req-tz1")).expect("first merge_item should succeed");
-        let item2 = merge_item(&db, sid, make_draft(t2, "req-tz2")).expect("second merge_item should succeed");
+        let item1 = merge_item(&db, sid, make_draft(t1, "req-tz1"))
+            .expect("first merge_item should succeed");
+        let item2 = merge_item(&db, sid, make_draft(t2, "req-tz2"))
+            .expect("second merge_item should succeed");
 
         assert_ne!(
             item1.receipt_id, item2.receipt_id,
@@ -218,8 +239,10 @@ mod tests {
         let t = 1_714_867_200i64;
         let sid = insert_session(&db, None, t);
 
-        let item1 = merge_item(&db, sid, make_draft(t, "req-null1")).expect("first merge_item should succeed");
-        let item2 = merge_item(&db, sid, make_draft(t, "req-null2")).expect("second merge_item should succeed");
+        let item1 = merge_item(&db, sid, make_draft(t, "req-null1"))
+            .expect("first merge_item should succeed");
+        let item2 = merge_item(&db, sid, make_draft(t, "req-null2"))
+            .expect("second merge_item should succeed");
 
         assert_eq!(item1.receipt_id, item2.receipt_id);
         assert_eq!(count_receipts(&db), 1);
@@ -240,10 +263,15 @@ mod tests {
         let sid1 = insert_session(&db, Some("/a"), t);
         let sid2 = insert_session(&db, Some("/a"), t);
 
-        let item1 = merge_item(&db, sid1, make_draft(t, "req-cross1")).expect("first merge_item should succeed");
-        let item2 = merge_item(&db, sid2, make_draft(t, "req-cross2")).expect("second merge_item should succeed");
+        let item1 = merge_item(&db, sid1, make_draft(t, "req-cross1"))
+            .expect("first merge_item should succeed");
+        let item2 = merge_item(&db, sid2, make_draft(t, "req-cross2"))
+            .expect("second merge_item should succeed");
 
-        assert_eq!(item1.receipt_id, item2.receipt_id, "both sessions share the same receipt");
+        assert_eq!(
+            item1.receipt_id, item2.receipt_id,
+            "both sessions share the same receipt"
+        );
         assert_eq!(count_receipts(&db), 1);
 
         // receipt.session_id stays as first writer (sid1)
@@ -266,7 +294,11 @@ mod tests {
         let result = merge_item(&db, 9999, make_draft(t, "req-unknown"));
         assert!(result.is_err(), "unknown session must return Err");
 
-        assert_eq!(count_receipts(&db), before_receipts, "no receipt should be created");
+        assert_eq!(
+            count_receipts(&db),
+            before_receipts,
+            "no receipt should be created"
+        );
         assert_eq!(count_items(&db), before_items, "no item should be created");
     }
 }

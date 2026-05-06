@@ -67,9 +67,7 @@ impl SessionRepository {
     /// Returns `Err` on lock poison, transaction begin/commit failure, insert
     /// failure, or if the row is missing after upsert (should never happen).
     pub fn upsert(&self, new: NewSession) -> anyhow::Result<Session> {
-        let mut conn = self
-            .db
-            .lock();
+        let mut conn = self.db.lock();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("SessionRepository::upsert: begin")?;
@@ -203,8 +201,16 @@ mod tests {
         let s2 = repo.upsert(second).expect("second upsert should succeed");
 
         assert_eq!(s1.id, s2.id, "both calls must return the same id");
-        assert_eq!(s1.cwd, Some("/tmp".to_string()), "cwd from first call must be preserved");
-        assert_eq!(s2.cwd, Some("/tmp".to_string()), "second call must also return first cwd");
+        assert_eq!(
+            s1.cwd,
+            Some("/tmp".to_string()),
+            "cwd from first call must be preserved"
+        );
+        assert_eq!(
+            s2.cwd,
+            Some("/tmp".to_string()),
+            "second call must also return first cwd"
+        );
 
         let conn = db.lock();
         let count: i64 = conn

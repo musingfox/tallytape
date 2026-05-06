@@ -84,8 +84,8 @@ fn parse_one(path: &Path) -> anyhow::Result<(NewSession, i64)> {
 ///
 /// Non-`.json` files and subdirectories are silently skipped.
 pub fn discover(dir: &Path) -> anyhow::Result<DiscoveryResult> {
-    let entries = fs::read_dir(dir)
-        .with_context(|| format!("discovery::discover: read_dir {:?}", dir))?;
+    let entries =
+        fs::read_dir(dir).with_context(|| format!("discovery::discover: read_dir {:?}", dir))?;
 
     let mut buffer: Vec<(NewSession, i64)> = Vec::new();
     let mut errors: Vec<(PathBuf, anyhow::Error)> = Vec::new();
@@ -172,7 +172,7 @@ mod tests {
 
         assert_eq!(result.sessions[0].external_id, "AAA");
         assert_eq!(result.sessions[1].external_id, "BBB");
-        assert_eq!(result.sessions[0].started_at, 2000);   // 2000000 / 1000
+        assert_eq!(result.sessions[0].started_at, 2000); // 2000000 / 1000
         assert_eq!(result.sessions[0].source, "claude-code");
         assert_eq!(result.sessions[0].ended_at, None);
         assert_eq!(result.sessions[0].metadata, Some(a_contents.to_string()));
@@ -184,7 +184,11 @@ mod tests {
     #[test]
     fn broken_json_mixed_with_valid() {
         let dir = tempdir().unwrap();
-        write(dir.path(), "valid.json", r#"{"sessionId":"AAA","cwd":"/x","startedAt":1000000,"updatedAt":1000}"#);
+        write(
+            dir.path(),
+            "valid.json",
+            r#"{"sessionId":"AAA","cwd":"/x","startedAt":1000000,"updatedAt":1000}"#,
+        );
         write(dir.path(), "broken.json", "not json");
 
         let result = discover(dir.path()).unwrap();
@@ -199,7 +203,11 @@ mod tests {
     #[test]
     fn missing_required_field_no_session_id() {
         let dir = tempdir().unwrap();
-        write(dir.path(), "nosid.json", r#"{"cwd":"/x","startedAt":1,"updatedAt":1}"#);
+        write(
+            dir.path(),
+            "nosid.json",
+            r#"{"cwd":"/x","startedAt":1,"updatedAt":1}"#,
+        );
 
         let result = discover(dir.path()).unwrap();
         assert_eq!(result.sessions.len(), 0);
@@ -212,7 +220,11 @@ mod tests {
     #[test]
     fn non_json_files_and_subdirs_skipped() {
         let dir = tempdir().unwrap();
-        write(dir.path(), "valid.json", r#"{"sessionId":"AAA","cwd":"/x","startedAt":1000000,"updatedAt":1000}"#);
+        write(
+            dir.path(),
+            "valid.json",
+            r#"{"sessionId":"AAA","cwd":"/x","startedAt":1000000,"updatedAt":1000}"#,
+        );
         write(dir.path(), "notes.txt", "some text here");
         std::fs::create_dir(dir.path().join("sub")).unwrap();
 
@@ -236,8 +248,16 @@ mod tests {
     #[test]
     fn deterministic_tiebreak_identical_updated_at() {
         let dir = tempdir().unwrap();
-        write(dir.path(), "z.json", r#"{"sessionId":"ZZZ","cwd":"/z","startedAt":1000000,"updatedAt":5000}"#);
-        write(dir.path(), "a.json", r#"{"sessionId":"AAA","cwd":"/a","startedAt":1000000,"updatedAt":5000}"#);
+        write(
+            dir.path(),
+            "z.json",
+            r#"{"sessionId":"ZZZ","cwd":"/z","startedAt":1000000,"updatedAt":5000}"#,
+        );
+        write(
+            dir.path(),
+            "a.json",
+            r#"{"sessionId":"AAA","cwd":"/a","startedAt":1000000,"updatedAt":5000}"#,
+        );
 
         let result = discover(dir.path()).unwrap();
         assert_eq!(result.sessions.len(), 2);
@@ -252,8 +272,16 @@ mod tests {
     #[test]
     fn pick_by_id_hit() {
         let dir = tempdir().unwrap();
-        write(dir.path(), "a.json", r#"{"sessionId":"AAA","cwd":"/x","startedAt":2000000,"updatedAt":2000}"#);
-        write(dir.path(), "b.json", r#"{"sessionId":"BBB","cwd":"/y","startedAt":1000000,"updatedAt":1000}"#);
+        write(
+            dir.path(),
+            "a.json",
+            r#"{"sessionId":"AAA","cwd":"/x","startedAt":2000000,"updatedAt":2000}"#,
+        );
+        write(
+            dir.path(),
+            "b.json",
+            r#"{"sessionId":"BBB","cwd":"/y","startedAt":1000000,"updatedAt":1000}"#,
+        );
 
         let result = discover(dir.path()).unwrap();
         let picked = result.pick(Some("BBB"));
@@ -269,8 +297,16 @@ mod tests {
     #[test]
     fn pick_none_returns_first() {
         let dir = tempdir().unwrap();
-        write(dir.path(), "a.json", r#"{"sessionId":"AAA","cwd":"/x","startedAt":2000000,"updatedAt":2000}"#);
-        write(dir.path(), "b.json", r#"{"sessionId":"BBB","cwd":"/y","startedAt":1000000,"updatedAt":1000}"#);
+        write(
+            dir.path(),
+            "a.json",
+            r#"{"sessionId":"AAA","cwd":"/x","startedAt":2000000,"updatedAt":2000}"#,
+        );
+        write(
+            dir.path(),
+            "b.json",
+            r#"{"sessionId":"BBB","cwd":"/y","startedAt":1000000,"updatedAt":1000}"#,
+        );
 
         let result = discover(dir.path()).unwrap();
         let picked = result.pick(None);
@@ -285,8 +321,16 @@ mod tests {
     #[test]
     fn pick_miss_returns_none() {
         let dir = tempdir().unwrap();
-        write(dir.path(), "a.json", r#"{"sessionId":"AAA","cwd":"/x","startedAt":2000000,"updatedAt":2000}"#);
-        write(dir.path(), "b.json", r#"{"sessionId":"BBB","cwd":"/y","startedAt":1000000,"updatedAt":1000}"#);
+        write(
+            dir.path(),
+            "a.json",
+            r#"{"sessionId":"AAA","cwd":"/x","startedAt":2000000,"updatedAt":2000}"#,
+        );
+        write(
+            dir.path(),
+            "b.json",
+            r#"{"sessionId":"BBB","cwd":"/y","startedAt":1000000,"updatedAt":1000}"#,
+        );
 
         let result = discover(dir.path()).unwrap();
         assert!(result.pick(Some("missing")).is_none());

@@ -81,13 +81,19 @@ mod tests {
 
         write_log(&path, Some("abc"), &err);
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("session=abc"), "expected session=abc in: {contents}");
+        assert!(
+            contents.contains("session=abc"),
+            "expected session=abc in: {contents}"
+        );
 
         // reset and test None
         std::fs::remove_file(&path).unwrap();
         write_log(&path, None, &err);
         let contents2 = std::fs::read_to_string(&path).unwrap();
-        assert!(contents2.contains("session=?"), "expected session=? in: {contents2}");
+        assert!(
+            contents2.contains("session=?"),
+            "expected session=? in: {contents2}"
+        );
     }
 
     #[test]

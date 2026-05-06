@@ -297,7 +297,10 @@ mod tests {
             .upsert_by_cwd_date(Some(sid), "/proj/b", t)
             .expect("second upsert should succeed");
 
-        assert_ne!(ra.id, rb.id, "different cwd must produce different receipts");
+        assert_ne!(
+            ra.id, rb.id,
+            "different cwd must produce different receipts"
+        );
 
         let conn = db.lock();
         let count: i64 = conn
@@ -403,9 +406,27 @@ mod tests {
         // Get actual date strings from SQLite for the epochs
         let (d1, d3, d5) = {
             let conn = db.lock();
-            let d1: String = conn.query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t1], |r| r.get(0)).unwrap();
-            let d3: String = conn.query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t3], |r| r.get(0)).unwrap();
-            let d5: String = conn.query_row("SELECT date(?1,'unixepoch','localtime')", rusqlite::params![t5], |r| r.get(0)).unwrap();
+            let d1: String = conn
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![t1],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let d3: String = conn
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![t3],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let d5: String = conn
+                .query_row(
+                    "SELECT date(?1,'unixepoch','localtime')",
+                    rusqlite::params![t5],
+                    |r| r.get(0),
+                )
+                .unwrap();
             (d1, d3, d5)
         };
 

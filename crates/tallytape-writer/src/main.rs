@@ -1,4 +1,5 @@
 mod cli;
+mod detach;
 mod error_log;
 mod payload;
 mod persist;
@@ -18,7 +19,9 @@ fn claude_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude"))
 }
 
-/// Parse the hook payload and run load_session + persist.
+/// Parse the hook payload and run load_session + persist synchronously.
+/// Used by the `__worker` subcommand (child process).
+///
 /// Writes `*session_id` as soon as the payload is parsed so the caller can
 /// include it in error log entries even when a later step fails.
 fn run_hook(session_id: &mut Option<String>) -> anyhow::Result<()> {
@@ -39,15 +42,38 @@ fn run_hook(session_id: &mut Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse the hook payload from stdin synchronously, then spawn a detached
+/// `__worker` child to perform the actual ingest. Parent always exits 0.
+fn run_hook_fast(session_id: &mut Option<String>) -> anyhow::Result<()> {
+    // Parse synchronously in parent — this is necessary to detect malformed
+    // payloads (C5) without spawning a child, and is fast (just stdin read).
+    let payload = parse_payload(io::stdin().lock())?;
+    *session_id = Some(payload.session_id.clone());
+
+    // Spawn detached child. Errors here are logged; parent still exits 0.
+    detach::spawn_worker(&payload)?;
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args = Cli::parse();
     match args.resolved_command() {
         Command::Run => {
             let mut sid: Option<String> = None;
+            if let Err(e) = run_hook_fast(&mut sid) {
+                if let Ok(path) = tallytape_core::log_path() {
+                    error_log::write_log(&path, sid.as_deref(), &e);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Command::Worker => {
+            let mut sid: Option<String> = None;
             if let Err(e) = run_hook(&mut sid) {
                 if let Ok(path) = tallytape_core::log_path() {
                     error_log::write_log(&path, sid.as_deref(), &e);
                 }
+                return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS
         }
