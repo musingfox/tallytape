@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.102"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+directories = "5"
 log = "0.4"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 rusqlite_migration = "2.5.0"
