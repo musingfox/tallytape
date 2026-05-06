@@ -26,3 +26,7 @@ dist-ssr/
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code (local-only)
+.claude/settings.local.json
+.claude/*.local.md
