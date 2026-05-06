@@ -204,7 +204,11 @@ check_lock_sync() {
     warn "package.json changed but lock file not staged"; found=1
   fi
   if echo "$staged" | grep -qE "(^|/)Cargo\.toml$" && ! echo "$staged" | grep -q "Cargo.lock"; then
-    warn "Cargo.toml changed but Cargo.lock not staged"; found=1
+    if command -v cargo &>/dev/null && cargo check --locked --offline --workspace --quiet &>/dev/null; then
+      :  # lockfile is genuinely consistent with Cargo.toml — no update required
+    else
+      warn "Cargo.toml changed but Cargo.lock not staged"; found=1
+    fi
   fi
 
   [ $found -eq 0 ] && pass "Lock files consistent" || true
