@@ -22,6 +22,7 @@ pub fn log_path() -> anyhow::Result<PathBuf> {
 mod tests {
     use super::*;
 
+    #[serial_test::serial]
     #[test]
     fn returns_path_ending_in_sqlite_file() {
         let path = db_path().expect("db_path should resolve");
@@ -34,6 +35,7 @@ mod tests {
         assert!(parent.is_dir());
     }
 
+    #[serial_test::serial]
     #[test]
     fn parent_contains_tallytape_segment() {
         let path = db_path().expect("db_path should resolve");
@@ -44,6 +46,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn log_path_returns_writer_log_filename() {
         let path = log_path().expect("log_path should resolve");
@@ -53,10 +56,31 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn log_path_parent_is_same_as_db_path_parent() {
         let log = log_path().expect("log_path should resolve");
         let db = db_path().expect("db_path should resolve");
         assert_eq!(log.parent(), db.parent());
+    }
+
+    /// T5: log_path() with a fresh HOME tempdir creates the parent directory.
+    #[serial_test::serial]
+    #[test]
+    fn log_path_creates_parent_dir_with_fresh_home() {
+        use tempfile::tempdir;
+        let home = tempdir().unwrap();
+        // Set HOME to the fresh tempdir so ProjectDirs resolves under it.
+        std::env::set_var("HOME", home.path());
+        let path = log_path().expect("log_path should resolve with fresh HOME");
+        let parent = path.parent().expect("path has parent");
+        assert!(
+            parent.exists(),
+            "parent dir should be created by log_path(), but {} does not exist",
+            parent.display()
+        );
+        assert!(parent.is_dir());
+        // Restore HOME (best-effort; tests may run in parallel so this is advisory)
+        std::env::remove_var("HOME");
     }
 }

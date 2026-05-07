@@ -174,6 +174,201 @@ fn empty_stdin_exits_zero_and_logs_error() {
     );
 }
 
+/// T1: payload with bogus session_id and cwd whose transcript does NOT exist →
+/// child exits, writer.log contains level=WARN line with bogus-sid-xyz and "transcript missing".
+#[test]
+fn t1_warn_logged_for_missing_transcript() {
+    let home = TempDir::new().expect("tempdir for fake HOME");
+    let log_path = expected_log_path(&home);
+
+    let payload =
+        r#"{"session_id":"bogus-sid-xyz","cwd":"/tmp/no-such-cwd-p2-9"}"#;
+
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .env("HOME", home.path())
+        .env_remove("TALLYTAPE_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn tallytape-writer");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("wait failed");
+    assert!(status.success(), "parent must exit 0, got: {status}");
+
+    // Wait for the detached worker to complete and write the log.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let contents = read_log(&log_path);
+        if contents.contains("level=WARN") && contents.contains("bogus-sid-xyz") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(
+        log_path.exists(),
+        "writer.log must exist at {}",
+        log_path.display()
+    );
+    let contents = read_log(&log_path);
+    assert!(
+        contents.contains("level=WARN"),
+        "writer.log should contain level=WARN, got:\n{contents}"
+    );
+    assert!(
+        contents.contains("bogus-sid-xyz"),
+        "writer.log should contain bogus-sid-xyz, got:\n{contents}"
+    );
+    assert!(
+        contents.contains("not found") || contents.contains("transcript missing"),
+        "writer.log should mention missing transcript or not found, got:\n{contents}"
+    );
+}
+
+/// T2: successful (or empty-but-not-failed) ingest at default TALLYTAPE_LOG (unset).
+/// Log file MUST NOT contain level=INFO or "persisted session".
+#[test]
+fn t2_no_info_logged_at_default_warn_level() {
+    use std::fs;
+    let home = TempDir::new().expect("tempdir for fake HOME");
+    let log_path = expected_log_path(&home);
+
+    // Create a valid transcript at the expected path so ingest succeeds.
+    // transcript_path = ~/.claude/projects/<slugified_cwd>/<session_id>.jsonl
+    // We use a simple cwd that the writer can resolve.
+    let cwd = "/tmp/t2-test-cwd";
+    let session_id = "t2-session-ok";
+
+    // Build the claude_home path that the writer will use (HOME/.claude)
+    let claude_home = home.path().join(".claude");
+    // Compute transcript path using tallytape_core's canonical function.
+    let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
+    let transcript_dir = transcript_file.parent().expect("transcript_file has parent");
+    fs::create_dir_all(transcript_dir).expect("create transcript dir");
+
+    // One valid assistant line
+    let assistant_line = r#"{"type":"assistant","requestId":"r1","uuid":"u1","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"m1","model":"claude-opus-4-7","usage":{"input_tokens":10,"output_tokens":20}}}"#;
+    fs::write(&transcript_file, assistant_line).expect("write transcript");
+
+    let payload = format!(r#"{{"session_id":"{session_id}","cwd":"{cwd}"}}"#);
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .env("HOME", home.path())
+        .env_remove("TALLYTAPE_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn tallytape-writer");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("wait failed");
+    assert!(status.success(), "parent must exit 0, got: {status}");
+
+    // Wait a generous time for the worker to finish, then check log.
+    // We wait for the DB to appear as a proxy that the worker completed.
+    #[cfg(target_os = "macos")]
+    let db_path = home.path()
+        .join("Library")
+        .join("Application Support")
+        .join("tallytape")
+        .join("tallytape.sqlite");
+    #[cfg(not(target_os = "macos"))]
+    let db_path = home.path()
+        .join(".local")
+        .join("share")
+        .join("tallytape")
+        .join("tallytape.sqlite");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !db_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let contents = read_log(&log_path);
+    assert!(
+        !contents.contains("level=INFO"),
+        "writer.log should NOT contain level=INFO at default Warn filter, got:\n{contents}"
+    );
+    assert!(
+        !contents.contains("persisted session"),
+        "writer.log should NOT contain 'persisted session' at default Warn filter, got:\n{contents}"
+    );
+}
+
+/// T4: pre-fill writer.log with 1.5 MB, trigger T1 payload — final size < 4 KB
+/// and contains a level=WARN line with bogus-sid-xyz.
+#[test]
+fn t4_truncation_before_warn_logged() {
+    use std::fs;
+    let home = TempDir::new().expect("tempdir for fake HOME");
+    let log_path = expected_log_path(&home);
+
+    // Pre-fill writer.log with 1.5 MB of 'x'
+    let parent = log_path.parent().expect("log_path has parent");
+    fs::create_dir_all(parent).expect("create log parent dir");
+    let big = vec![b'x'; 1_572_864];
+    fs::write(&log_path, &big).expect("pre-fill writer.log");
+
+    let payload =
+        r#"{"session_id":"bogus-sid-xyz","cwd":"/tmp/no-such-cwd-p2-9"}"#;
+
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .env("HOME", home.path())
+        .env_remove("TALLYTAPE_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn tallytape-writer");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("wait failed");
+    assert!(status.success(), "parent must exit 0, got: {status}");
+
+    // Wait for the detached worker to complete and write the log.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let contents = read_log(&log_path);
+        if contents.contains("level=WARN") && contents.contains("bogus-sid-xyz") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let size = fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+    assert!(
+        size < 4096,
+        "writer.log should be < 4 KB after truncation, got {size} bytes"
+    );
+
+    let contents = read_log(&log_path);
+    assert!(
+        contents.contains("level=WARN"),
+        "writer.log should contain level=WARN after truncation, got:\n{contents}"
+    );
+    assert!(
+        contents.contains("bogus-sid-xyz"),
+        "writer.log should contain bogus-sid-xyz after truncation, got:\n{contents}"
+    );
+}
+
 /// C4-B (extended): poll writer.log for child error within a generous timeout.
 ///
 /// Payload has transcript_path field set to nonexistent path. The `HookPayload`

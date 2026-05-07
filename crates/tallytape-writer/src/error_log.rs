@@ -1,16 +1,22 @@
+use std::io::IsTerminal as _;
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Mutex;
 
 const MAX_BYTES: u64 = 1_048_576;
 
-pub fn write_log(path: &Path, session_id: Option<&str>, err: &anyhow::Error) {
+static LOG_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Append `line` to the file at `path`. Caller must supply the trailing `\n`.
+/// If the file is ≥ 1 MB before the append, it is truncated first.
+/// All IO errors are swallowed silently; metadata read failure is treated as size 0.
+/// If the parent directory does not exist the write will fail silently (no panic).
+pub(crate) fn append_line(path: &Path, line: &str) {
+    let _guard = LOG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if size >= MAX_BYTES {
         let _ = std::fs::write(path, b"");
     }
-    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
-    let sid = session_id.unwrap_or("?");
-    let line = format!("[{ts}] session={sid} error={err:#}\n");
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -18,11 +24,56 @@ pub fn write_log(path: &Path, session_id: Option<&str>, err: &anyhow::Error) {
         .and_then(|mut f| f.write_all(line.as_bytes()));
 }
 
+pub fn write_log(path: &Path, session_id: Option<&str>, err: &anyhow::Error) {
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+    let sid = session_id.unwrap_or("?");
+    let line = format!("[{ts}] session={sid} error={err:#}\n");
+    append_line(path, &line);
+    if std::io::stderr().is_terminal() {
+        eprint!("{line}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::anyhow;
     use tempfile::tempdir;
+
+    // --- LogSink (append_line) unit tests ---
+
+    #[test]
+    fn append_line_creates_file_with_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("writer.log");
+        append_line(&path, "hello\n");
+        assert!(path.exists(), "file should be created");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "hello\n");
+    }
+
+    #[test]
+    fn append_line_truncates_at_1_5mb() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("writer.log");
+        // Write 1.5 MB of 'x'
+        let big = vec![b'x'; 1_572_864];
+        std::fs::write(&path, &big).unwrap();
+        append_line(&path, "x\n");
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(size < 2048, "file should be truncated, got {size} bytes");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.ends_with("x\n"), "file should end with appended line");
+    }
+
+    #[test]
+    fn append_line_nonexistent_subdir_no_panic() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent_subdir").join("writer.log");
+        // Must not panic; file is not created because parent dir doesn't exist
+        append_line(&path, "y\n");
+        assert!(!path.exists(), "file should NOT be created when parent dir missing");
+    }
 
     #[test]
     fn creates_log_file_when_missing() {

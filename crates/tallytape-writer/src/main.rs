@@ -1,6 +1,7 @@
 mod cli;
 mod detach;
 mod error_log;
+mod log_subscriber;
 mod payload;
 mod persist;
 mod session_loader;
@@ -59,6 +60,7 @@ fn main() -> ExitCode {
     let args = Cli::parse();
     match args.resolved_command() {
         Command::Run => {
+            let _ = log_subscriber::init_logger();
             let mut sid: Option<String> = None;
             if let Err(e) = run_hook_fast(&mut sid) {
                 if let Ok(path) = tallytape_core::log_path() {
@@ -68,6 +70,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Worker => {
+            let _ = log_subscriber::init_logger();
             let mut sid: Option<String> = None;
             if let Err(e) = run_hook(&mut sid) {
                 if let Ok(path) = tallytape_core::log_path() {
