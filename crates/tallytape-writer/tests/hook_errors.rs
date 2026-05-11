@@ -175,9 +175,9 @@ fn empty_stdin_exits_zero_and_logs_error() {
 }
 
 /// T1: payload with bogus session_id and cwd whose transcript does NOT exist →
-/// child exits, writer.log contains level=WARN line with bogus-sid-xyz and "transcript missing".
+/// child exits, writer.log contains level=ERROR line with bogus-sid-xyz and "not found".
 #[test]
-fn t1_warn_logged_for_missing_transcript() {
+fn t1_error_logged_for_missing_transcript() {
     let home = TempDir::new().expect("tempdir for fake HOME");
     let log_path = expected_log_path(&home);
 
@@ -206,7 +206,7 @@ fn t1_warn_logged_for_missing_transcript() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         let contents = read_log(&log_path);
-        if contents.contains("level=WARN") && contents.contains("bogus-sid-xyz") {
+        if contents.contains("level=ERROR") && contents.contains("bogus-sid-xyz") {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -219,8 +219,8 @@ fn t1_warn_logged_for_missing_transcript() {
     );
     let contents = read_log(&log_path);
     assert!(
-        contents.contains("level=WARN"),
-        "writer.log should contain level=WARN, got:\n{contents}"
+        contents.contains("level=ERROR"),
+        "writer.log should contain level=ERROR, got:\n{contents}"
     );
     assert!(
         contents.contains("bogus-sid-xyz"),
@@ -229,6 +229,85 @@ fn t1_warn_logged_for_missing_transcript() {
     assert!(
         contents.contains("not found") || contents.contains("transcript missing"),
         "writer.log should mention missing transcript or not found, got:\n{contents}"
+    );
+}
+
+/// TC2 / T1b: payload whose transcript exists but cannot be opened (mode 000) →
+/// writer.log contains level=ERROR with the session_id and a parse-failure message.
+///
+/// `parse_transcript_file_with_stats` only returns Err on File::open failure.
+/// We trigger that by creating the file then removing read permission.
+#[cfg(unix)]
+#[test]
+fn t1b_error_logged_for_parse_failure() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = TempDir::new().expect("tempdir for fake HOME");
+    let log_path = expected_log_path(&home);
+
+    let session_id = "parse-fail-sid-p2-9";
+    let cwd = "/tmp/parse-fail-cwd-p2-9";
+
+    // Build transcript path that the writer will look for.
+    let claude_home = home.path().join(".claude");
+    let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
+    let transcript_dir = transcript_file.parent().expect("transcript_file has parent");
+    fs::create_dir_all(transcript_dir).expect("create transcript dir");
+    // Write content, then make the file unreadable so File::open fails.
+    fs::write(&transcript_file, "not json line\n{also broken\n").expect("write transcript");
+    fs::set_permissions(&transcript_file, fs::Permissions::from_mode(0o000))
+        .expect("chmod 000 transcript");
+
+    let payload = format!(r#"{{"session_id":"{session_id}","cwd":"{cwd}"}}"#);
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .env("HOME", home.path())
+        .env_remove("TALLYTAPE_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn tallytape-writer");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("wait failed");
+    assert!(status.success(), "parent must exit 0, got: {status}");
+
+    // Wait for the detached worker to complete and write the log.
+    // Keep the file unreadable until we see the log entry (or timeout).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let contents = read_log(&log_path);
+        if contents.contains("level=ERROR") && contents.contains(session_id) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Restore permissions so TempDir cleanup can delete the file.
+    let _ = fs::set_permissions(&transcript_file, fs::Permissions::from_mode(0o644));
+
+    assert!(
+        log_path.exists(),
+        "writer.log must exist at {}",
+        log_path.display()
+    );
+    let contents = read_log(&log_path);
+    assert!(
+        contents.contains("level=ERROR"),
+        "writer.log should contain level=ERROR for parse failure, got:\n{contents}"
+    );
+    assert!(
+        contents.contains(session_id),
+        "writer.log should contain session_id {session_id}, got:\n{contents}"
+    );
+    assert!(
+        contents.contains("parse_transcript_file_with_stats") || contents.contains("failed"),
+        "writer.log should mention parse failure, got:\n{contents}"
     );
 }
 
@@ -308,9 +387,9 @@ fn t2_no_info_logged_at_default_warn_level() {
 }
 
 /// T4: pre-fill writer.log with 1.5 MB, trigger T1 payload — final size < 4 KB
-/// and contains a level=WARN line with bogus-sid-xyz.
+/// and contains a level=ERROR line with bogus-sid-xyz.
 #[test]
-fn t4_truncation_before_warn_logged() {
+fn t4_truncation_before_error_logged() {
     use std::fs;
     let home = TempDir::new().expect("tempdir for fake HOME");
     let log_path = expected_log_path(&home);
@@ -346,7 +425,7 @@ fn t4_truncation_before_warn_logged() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         let contents = read_log(&log_path);
-        if contents.contains("level=WARN") && contents.contains("bogus-sid-xyz") {
+        if contents.contains("level=ERROR") && contents.contains("bogus-sid-xyz") {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -360,75 +439,11 @@ fn t4_truncation_before_warn_logged() {
 
     let contents = read_log(&log_path);
     assert!(
-        contents.contains("level=WARN"),
-        "writer.log should contain level=WARN after truncation, got:\n{contents}"
+        contents.contains("level=ERROR"),
+        "writer.log should contain level=ERROR after truncation, got:\n{contents}"
     );
     assert!(
         contents.contains("bogus-sid-xyz"),
         "writer.log should contain bogus-sid-xyz after truncation, got:\n{contents}"
     );
-}
-
-/// C4-B (extended): poll writer.log for child error within a generous timeout.
-///
-/// Payload has transcript_path field set to nonexistent path. The `HookPayload`
-/// struct ignores `transcript_path` (it's not currently in the struct) — so
-/// session_loader uses cwd-based resolution and degrades gracefully (no error logged).
-/// We instead verify no panic occurs and parent exits 0.
-#[test]
-fn parent_exits_zero_with_child_on_bad_payload() {
-    let home = TempDir::new().expect("tempdir for fake HOME");
-
-    // Valid JSON but cwd points to a path where no session/transcript exists.
-    let payload = r#"{"session_id":"t-c4b-ext","cwd":"/nonexistent/absolute/path/xyz"}"#;
-
-    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
-
-    let mut child = Command::new(bin)
-        .env("HOME", home.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn tallytape-writer");
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(payload.as_bytes()).unwrap();
-    }
-
-    let status = child.wait().expect("wait failed");
-    assert!(
-        status.success(),
-        "parent must exit 0 even with unresolvable cwd, got: {status}"
-    );
-
-    // Wait for the child worker to finish (it's detached, give it some time).
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let db_path = {
-        #[cfg(target_os = "macos")]
-        {
-            home.path()
-                .join("Library")
-                .join("Application Support")
-                .join("tallytape")
-                .join("tallytape.sqlite")
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            home.path()
-                .join(".local")
-                .join("share")
-                .join("tallytape")
-                .join("tallytape.sqlite")
-        }
-    };
-
-    // Poll until DB exists or timeout.
-    while !db_path.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    // If the child completed, DB should exist (session was written with degraded result).
-    // If it's still running somehow, that's still not a parent failure.
-    // The key assertion is parent already exited 0 above.
 }

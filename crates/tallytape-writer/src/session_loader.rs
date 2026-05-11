@@ -50,7 +50,11 @@ pub fn load_session(payload: &HookPayload, claude_home: &Path) -> SessionResult 
     let path = transcript_path(claude_home, &payload.cwd, &payload.session_id);
 
     if !path.exists() {
-        log::warn!("transcript missing: {} — degraded session", path.display());
+        log::error!(
+            "transcript not found for session {}: {} — degraded session",
+            payload.session_id,
+            path.display()
+        );
         return SessionResult {
             session,
             items: Vec::new(),
@@ -69,9 +73,10 @@ pub fn load_session(payload: &HookPayload, claude_home: &Path) -> SessionResult 
             stats: parsed.stats,
         },
         Err(e) => {
-            log::warn!(
-                "parse_transcript_file_with_stats({}) failed: {e}",
-                path.display()
+            log::error!(
+                "parse_transcript_file_with_stats({}) failed for session {}: {e}",
+                path.display(),
+                payload.session_id
             );
             SessionResult {
                 session,
