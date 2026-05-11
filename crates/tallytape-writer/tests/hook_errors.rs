@@ -447,3 +447,313 @@ fn t4_truncation_before_error_logged() {
         "writer.log should contain bogus-sid-xyz after truncation, got:\n{contents}"
     );
 }
+
+/// TC-C integration: a malformed subagent file emits WARN in writer.log mentioning
+/// the file name, while the other subagent file's item is still inserted.
+#[test]
+fn tc_c_malformed_subagent_warns_in_log() {
+    use std::fs;
+    let home = TempDir::new().expect("tempdir for fake HOME");
+    let log_path = expected_log_path(&home);
+
+    let session_id = "tc-c-integ-session";
+    let cwd = "/tmp/tc-c-integ-cwd";
+    let claude_home = home.path().join(".claude");
+
+    // Write session file.
+    let sessions_dir = claude_home.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let session_json = format!(
+        r#"{{"sessionId":"{session_id}","cwd":"{cwd}","startedAt":1700000000000,"updatedAt":1700000000000}}"#
+    );
+    fs::write(sessions_dir.join(format!("{session_id}.json")), &session_json).unwrap();
+
+    // Write parent transcript.
+    let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
+    let transcript_dir = transcript_file.parent().expect("has parent");
+    fs::create_dir_all(transcript_dir).unwrap();
+    let parent_line = r#"{"type":"assistant","requestId":"rp","uuid":"u-rp","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg-rp","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+    fs::write(&transcript_file, parent_line).unwrap();
+
+    // Write subagents: agent-1.jsonl malformed, agent-2.jsonl valid.
+    let subagents_dir = transcript_dir.join(session_id).join("subagents");
+    fs::create_dir_all(&subagents_dir).unwrap();
+    fs::write(subagents_dir.join("agent-1.jsonl"), "not json\n{broken").unwrap();
+    let sub2_line = r#"{"type":"assistant","requestId":"rb","uuid":"u-rb","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg-rb","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+    fs::write(subagents_dir.join("agent-2.jsonl"), sub2_line).unwrap();
+
+    let payload = format!(r#"{{"session_id":"{session_id}","cwd":"{cwd}"}}"#);
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .env("HOME", home.path())
+        .env("TALLYTAPE_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn tallytape-writer");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("wait failed");
+    assert!(status.success(), "parent must exit 0, got: {status}");
+
+    // Wait for writer to emit the WARN.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        let contents = read_log(&log_path);
+        if contents.contains("agent-1.jsonl") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let contents = read_log(&log_path);
+    assert!(
+        contents.contains("agent-1.jsonl"),
+        "writer.log should mention agent-1.jsonl for malformed subagent, got:\n{contents}"
+    );
+}
+
+/// TC-B integration: no subagents dir → writer.log must not mention "subagent".
+#[test]
+fn tc_b_no_subagents_dir_no_warn_in_log() {
+    use std::fs;
+    let home = TempDir::new().expect("tempdir for fake HOME");
+
+    let session_id = "tc-b-integ-session";
+    let cwd = "/tmp/tc-b-integ-cwd";
+    let claude_home = home.path().join(".claude");
+
+    // Write session file.
+    let sessions_dir = claude_home.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let session_json = format!(
+        r#"{{"sessionId":"{session_id}","cwd":"{cwd}","startedAt":1700000000000,"updatedAt":1700000000000}}"#
+    );
+    fs::write(sessions_dir.join(format!("{session_id}.json")), &session_json).unwrap();
+
+    // Write parent transcript only — no <sid>/subagents/ dir.
+    let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
+    let transcript_dir = transcript_file.parent().expect("has parent");
+    fs::create_dir_all(transcript_dir).unwrap();
+    let parent_line = r#"{"type":"assistant","requestId":"rp","uuid":"u-rp","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg-rp","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+    fs::write(&transcript_file, parent_line).unwrap();
+
+    let payload = format!(r#"{{"session_id":"{session_id}","cwd":"{cwd}"}}"#);
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .env("HOME", home.path())
+        .env("TALLYTAPE_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn tallytape-writer");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("wait failed");
+    assert!(status.success(), "parent must exit 0, got: {status}");
+
+    // Wait for DB as a proxy that the worker completed.
+    let db_path = {
+        #[cfg(target_os = "macos")]
+        {
+            home.path()
+                .join("Library")
+                .join("Application Support")
+                .join("tallytape")
+                .join("tallytape.sqlite")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            home.path()
+                .join(".local")
+                .join("share")
+                .join("tallytape")
+                .join("tallytape.sqlite")
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !db_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let log_path = expected_log_path(&home);
+    let contents = read_log(&log_path);
+    assert!(
+        !contents.contains("subagent"),
+        "writer.log must not mention 'subagent' when no subagents dir exists, got:\n{contents}"
+    );
+}
+
+/// TC-D integration: tool-results sibling dir is ignored; no mention in writer.log.
+#[test]
+fn tc_d_tool_results_not_mentioned_in_log() {
+    use std::fs;
+    let home = TempDir::new().expect("tempdir for fake HOME");
+
+    let session_id = "tc-d-integ-session";
+    let cwd = "/tmp/tc-d-integ-cwd";
+    let claude_home = home.path().join(".claude");
+
+    // Write session file.
+    let sessions_dir = claude_home.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let session_json = format!(
+        r#"{{"sessionId":"{session_id}","cwd":"{cwd}","startedAt":1700000000000,"updatedAt":1700000000000}}"#
+    );
+    fs::write(sessions_dir.join(format!("{session_id}.json")), &session_json).unwrap();
+
+    // Write parent transcript.
+    let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
+    let transcript_dir = transcript_file.parent().expect("has parent");
+    fs::create_dir_all(transcript_dir).unwrap();
+    let parent_line = r#"{"type":"assistant","requestId":"rp","uuid":"u-rp","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg-rp","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+    fs::write(&transcript_file, parent_line).unwrap();
+
+    // Write valid subagent.
+    let subagents_dir = transcript_dir.join(session_id).join("subagents");
+    fs::create_dir_all(&subagents_dir).unwrap();
+    let sub_line = r#"{"type":"assistant","requestId":"ra","uuid":"u-ra","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg-ra","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+    fs::write(subagents_dir.join("agent-1.jsonl"), sub_line).unwrap();
+
+    // Write tool-results sibling.
+    let tool_results_dir = transcript_dir.join(session_id).join("tool-results");
+    fs::create_dir_all(&tool_results_dir).unwrap();
+    fs::write(tool_results_dir.join("foo.txt"), "some tool result").unwrap();
+
+    let payload = format!(r#"{{"session_id":"{session_id}","cwd":"{cwd}"}}"#);
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .env("HOME", home.path())
+        .env("TALLYTAPE_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn tallytape-writer");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("wait failed");
+    assert!(status.success(), "parent must exit 0, got: {status}");
+
+    // Wait for DB as proxy for worker completion.
+    let db_path = {
+        #[cfg(target_os = "macos")]
+        {
+            home.path()
+                .join("Library")
+                .join("Application Support")
+                .join("tallytape")
+                .join("tallytape.sqlite")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            home.path()
+                .join(".local")
+                .join("share")
+                .join("tallytape")
+                .join("tallytape.sqlite")
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !db_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Verify 2 items in DB (parent + 1 subagent).
+    use rusqlite::Connection;
+    let conn = Connection::open(&db_path).expect("open DB");
+    let items: i64 = conn
+        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+        .unwrap_or(0);
+    assert_eq!(items, 2, "expected parent + 1 subagent item, got {items}");
+
+    // Verify tool-results never mentioned in log.
+    let log_path = expected_log_path(&home);
+    let contents = read_log(&log_path);
+    assert!(
+        !contents.contains("tool-results"),
+        "writer.log must not mention 'tool-results', got:\n{contents}"
+    );
+    assert!(
+        !contents.contains("foo.txt"),
+        "writer.log must not mention 'foo.txt', got:\n{contents}"
+    );
+}
+
+/// C4-B (extended): poll writer.log for child error within a generous timeout.
+///
+/// Payload has transcript_path field set to nonexistent path. The `HookPayload`
+/// struct ignores `transcript_path` (it's not currently in the struct) — so
+/// session_loader uses cwd-based resolution and degrades gracefully (no error logged).
+/// We instead verify no panic occurs and parent exits 0.
+#[test]
+fn parent_exits_zero_with_child_on_bad_payload() {
+    let home = TempDir::new().expect("tempdir for fake HOME");
+
+    // Valid JSON but cwd points to a path where no session/transcript exists.
+    let payload = r#"{"session_id":"t-c4b-ext","cwd":"/nonexistent/absolute/path/xyz"}"#;
+
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn tallytape-writer");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("wait failed");
+    assert!(
+        status.success(),
+        "parent must exit 0 even with unresolvable cwd, got: {status}"
+    );
+
+    // Wait for the child worker to finish (it's detached, give it some time).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let db_path = {
+        #[cfg(target_os = "macos")]
+        {
+            home.path()
+                .join("Library")
+                .join("Application Support")
+                .join("tallytape")
+                .join("tallytape.sqlite")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            home.path()
+                .join(".local")
+                .join("share")
+                .join("tallytape")
+                .join("tallytape.sqlite")
+        }
+    };
+
+    // Poll until DB exists or timeout.
+    while !db_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // If the child completed, DB should exist (session was written with degraded result).
+    // If it's still running somehow, that's still not a parent failure.
+    // The key assertion is parent already exited 0 above.
+}

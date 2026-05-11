@@ -291,65 +291,6 @@ mod tests {
         assert_eq!(count_items(&db), 0);
     }
 
-    // Test 5: cache tokens pass through correctly
-    #[test]
-    fn cache_tokens_pass_through_correctly() {
-        let dir = tempdir().unwrap();
-        let db = Database::open(dir.path().join("t5.db")).unwrap();
-
-        let item = ParsedItem {
-            request_id: "req-cache".to_string(),
-            message_id: None,
-            parent_uuid: None,
-            is_sidechain: false,
-            occurred_at: 1_700_000_000,
-            model: "claude-opus-4-7".to_string(),
-            service_tier: None,
-            input_tokens: 100,
-            output_tokens: 200,
-            cache_read_tokens: Some(5),
-            cache_creation_tokens: Some(7),
-            metadata: None,
-        };
-
-        let result = SessionResult {
-            session: make_session("session-5"),
-            items: vec![item],
-            stats: TokenStats::default(),
-        };
-
-        let outcome = persist_with_db(&db, result).expect("persist should succeed");
-        assert_eq!(outcome.inserted, 1);
-
-        // Verify cache tokens in DB
-        let conn = db.lock();
-        let (cache_read, cache_creation): (Option<i64>, Option<i64>) = conn
-            .query_row(
-                "SELECT cache_read_tokens, cache_creation_tokens FROM items WHERE request_id = 'req-cache'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .expect("item must exist");
-
-        assert_eq!(cache_read, Some(5));
-        assert_eq!(cache_creation, Some(7));
-
-        // Verify cost matches calculate_cost(model, 100, 200, 7, 5)
-        let expected_cost = calculate_cost("claude-opus-4-7", 100, 200, 7, 5)
-            .expect("known model should return cost");
-        let actual_cost: f64 = conn
-            .query_row(
-                "SELECT cost FROM items WHERE request_id = 'req-cache'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(
-            (actual_cost - expected_cost).abs() < 1e-9,
-            "cost mismatch: expected {expected_cost}, got {actual_cost}"
-        );
-    }
-
     // Test TC3: upsert failure logs ERROR with external_id
     #[test]
     fn upsert_failure_logs_error_with_external_id() {
@@ -414,5 +355,103 @@ mod tests {
         }
         // If msgs is empty the CapLog was not installed (logger already set); Err propagation
         // verified above satisfies the fallback path.
+    }
+
+    // TC-E: shared request_id between parent and subagent item → persist deduplicates.
+    #[test]
+    fn tc_e_shared_request_id_deduped_by_persist() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("tc_e.db")).unwrap();
+
+        // Two items with the same request_id "rdup" but different message_ids.
+        let item_parent = ParsedItem {
+            request_id: "rdup".to_string(),
+            message_id: Some("msg-parent".to_string()),
+            parent_uuid: None,
+            is_sidechain: false,
+            occurred_at: 1_700_000_000,
+            model: "claude-opus-4-7".to_string(),
+            service_tier: None,
+            input_tokens: 5,
+            output_tokens: 10,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+            metadata: None,
+        };
+        let item_sub = ParsedItem {
+            request_id: "rdup".to_string(),
+            message_id: Some("msg-sub".to_string()),
+            ..item_parent.clone()
+        };
+
+        let result = SessionResult {
+            session: make_session("tc-e-session"),
+            items: vec![item_parent, item_sub],
+            stats: TokenStats::default(),
+        };
+
+        let outcome = persist_with_db(&db, result).expect("persist should succeed");
+        assert_eq!(outcome.inserted, 1, "first rdup inserted");
+        assert_eq!(outcome.skipped_duplicates, 1, "second rdup is duplicate");
+        assert_eq!(count_items(&db), 1);
+    }
+
+    // Test 5: cache tokens pass through correctly
+    #[test]
+    fn cache_tokens_pass_through_correctly() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("t5.db")).unwrap();
+
+        let item = ParsedItem {
+            request_id: "req-cache".to_string(),
+            message_id: None,
+            parent_uuid: None,
+            is_sidechain: false,
+            occurred_at: 1_700_000_000,
+            model: "claude-opus-4-7".to_string(),
+            service_tier: None,
+            input_tokens: 100,
+            output_tokens: 200,
+            cache_read_tokens: Some(5),
+            cache_creation_tokens: Some(7),
+            metadata: None,
+        };
+
+        let result = SessionResult {
+            session: make_session("session-5"),
+            items: vec![item],
+            stats: TokenStats::default(),
+        };
+
+        let outcome = persist_with_db(&db, result).expect("persist should succeed");
+        assert_eq!(outcome.inserted, 1);
+
+        // Verify cache tokens in DB
+        let conn = db.lock();
+        let (cache_read, cache_creation): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT cache_read_tokens, cache_creation_tokens FROM items WHERE request_id = 'req-cache'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("item must exist");
+
+        assert_eq!(cache_read, Some(5));
+        assert_eq!(cache_creation, Some(7));
+
+        // Verify cost matches calculate_cost(model, 100, 200, 7, 5)
+        let expected_cost = calculate_cost("claude-opus-4-7", 100, 200, 7, 5)
+            .expect("known model should return cost");
+        let actual_cost: f64 = conn
+            .query_row(
+                "SELECT cost FROM items WHERE request_id = 'req-cache'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            (actual_cost - expected_cost).abs() < 1e-9,
+            "cost mismatch: expected {expected_cost}, got {actual_cost}"
+        );
     }
 }

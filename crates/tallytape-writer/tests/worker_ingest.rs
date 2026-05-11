@@ -81,6 +81,25 @@ fn setup_fixture(home: &TempDir) -> (String, String) {
     (session_id, cwd)
 }
 
+fn make_assistant_jsonl_line(request_id: &str) -> String {
+    format!(
+        r#"{{"type":"assistant","requestId":"{request_id}","uuid":"u-{request_id}","timestamp":"2025-11-15T10:23:45.000Z","message":{{"id":"msg-{request_id}","model":"claude-opus-4-7","usage":{{"input_tokens":5,"output_tokens":10}}}}}}"#
+    )
+}
+
+/// Write subagent transcript at `<home>/.claude/projects/<slug>/<sid>/subagents/<file_name>`.
+fn write_subagent_transcript(home: &TempDir, slug: &str, sid: &str, file_name: &str, contents: &str) {
+    let subagents_dir = home
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join(slug)
+        .join(sid)
+        .join("subagents");
+    std::fs::create_dir_all(&subagents_dir).unwrap();
+    std::fs::write(subagents_dir.join(file_name), contents).unwrap();
+}
+
 /// Count rows in a table from the DB at `db_path`.
 ///
 /// The helper is kept (vs. inline queries) because multiple tests reuse it.
@@ -138,6 +157,76 @@ fn worker_completes_ingest_and_writes_db_rows() {
     assert_eq!(
         items, 1,
         "expected 1 item row (from ASSISTANT_LINE), got {items}"
+    );
+}
+
+/// TC-A integration: parent + 2 subagent files all share the same DB session_id.
+#[test]
+fn worker_ingests_subagent_transcripts_under_parent_session() {
+    let home = TempDir::new().expect("tempdir for fake HOME");
+    let (session_id, cwd) = setup_fixture(&home);
+
+    // Compute slug (same logic as tallytape_core::slugify_cwd).
+    let slug: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+
+    // Add two subagent transcript files.
+    write_subagent_transcript(
+        &home,
+        &slug,
+        &session_id,
+        "agent-1.jsonl",
+        &make_assistant_jsonl_line("req-sub-1"),
+    );
+    write_subagent_transcript(
+        &home,
+        &slug,
+        &session_id,
+        "agent-2.jsonl",
+        &make_assistant_jsonl_line("req-sub-2"),
+    );
+
+    let payload = format!(r#"{{"session_id":"{session_id}","cwd":"{cwd}"}}"#);
+    let bin = env!("CARGO_BIN_EXE_tallytape-writer");
+
+    let mut child = Command::new(bin)
+        .arg("__worker")
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn __worker");
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let status = child.wait().expect("worker wait failed");
+    assert!(status.success(), "worker must exit 0, got: {status}");
+
+    let db_path = expected_db_path(&home);
+    assert!(db_path.exists(), "DB must exist at {}", db_path.display());
+
+    // 3 items total: 1 parent + 2 subagents.
+    let items = count_rows(&db_path, "items");
+    assert_eq!(items, 3, "expected 3 item rows (parent + 2 subagents), got {items}");
+
+    // All 3 items must share the same session_id row.
+    use rusqlite::Connection;
+    let conn = Connection::open(&db_path).expect("open DB");
+    let distinct_session_ids: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT session_id) FROM items",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        distinct_session_ids, 1,
+        "all items must share the parent's DB session_id"
     );
 }
 

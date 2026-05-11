@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -66,22 +67,105 @@ pub fn load_session(payload: &HookPayload, claude_home: &Path) -> SessionResult 
         log::warn!("wait_for_flush({}) failed: {e}", path.display());
     }
 
-    match parse_transcript_file_with_stats(&path) {
-        Ok(parsed) => SessionResult {
-            session,
-            items: parsed.items,
-            stats: parsed.stats,
-        },
+    let (mut items, mut stats) = match parse_transcript_file_with_stats(&path) {
+        Ok(parsed) => (parsed.items, parsed.stats),
         Err(e) => {
             log::error!(
                 "parse_transcript_file_with_stats({}) failed for session {}: {e}",
                 path.display(),
                 payload.session_id
             );
-            SessionResult {
+            return SessionResult {
                 session,
                 items: Vec::new(),
                 stats: TokenStats::default(),
+            };
+        }
+    };
+
+    // Load subagent transcripts from <projects>/<slug>/<sid>/subagents/
+    let subagents_dir = path
+        .parent()
+        .unwrap()
+        .join(&payload.session_id)
+        .join("subagents");
+
+    load_subagents(&subagents_dir, &mut items, &mut stats);
+
+    SessionResult {
+        session,
+        items,
+        stats,
+    }
+}
+
+/// Discover and parse all `agent-*.jsonl` files under `subagents_dir`.
+/// Never propagates errors: NotFound → silent; other errors → WARN.
+fn load_subagents(subagents_dir: &Path, items: &mut Vec<ParsedItem>, stats: &mut TokenStats) {
+    let read_dir = match std::fs::read_dir(subagents_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            // Missing subagents dir is expected — not an error.
+            return;
+        }
+        Err(e) => {
+            log::warn!(
+                "read_dir({}) failed: {e}",
+                subagents_dir.display()
+            );
+            return;
+        }
+    };
+
+    // Collect agent-*.jsonl paths and sort for determinism.
+    let mut subagent_paths: Vec<std::path::PathBuf> = read_dir
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let file_name = entry.file_name();
+            let name = file_name.to_str()?;
+            if name.starts_with("agent-") && name.ends_with(".jsonl") {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    subagent_paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+    for subagent_path in subagent_paths {
+        // wait_for_flush is advisory; on failure warn but still attempt parse.
+        if let Err(e) = wait_for_flush(&subagent_path, FLUSH_STABLE_MS, FLUSH_MAX_MS) {
+            log::warn!(
+                "wait_for_flush({}) failed: {e}",
+                subagent_path.display()
+            );
+        }
+
+        match parse_transcript_file_with_stats(&subagent_path) {
+            Ok(parsed) => {
+                // If the file is non-empty but produced zero items, it's likely malformed.
+                let file_size = std::fs::metadata(&subagent_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if parsed.items.is_empty() && file_size > 0 {
+                    log::warn!(
+                        "subagent file {} yielded no items (likely malformed)",
+                        subagent_path.display()
+                    );
+                }
+                // Sum stats field-wise.
+                stats.input_tokens += parsed.stats.input_tokens;
+                stats.output_tokens += parsed.stats.output_tokens;
+                stats.cache_creation_tokens += parsed.stats.cache_creation_tokens;
+                stats.cache_read_tokens += parsed.stats.cache_read_tokens;
+                items.extend(parsed.items);
+            }
+            Err(e) => {
+                log::warn!(
+                    "parse subagent {} failed: {e}",
+                    subagent_path.display()
+                );
             }
         }
     }
@@ -117,6 +201,10 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    // ---------------------------------------------------------------------------
+    // Fixture helpers
+    // ---------------------------------------------------------------------------
+
     fn payload(session_id: &str, cwd: &str) -> HookPayload {
         HookPayload {
             session_id: session_id.to_string(),
@@ -140,7 +228,22 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    /// Write a subagent transcript at
+    /// `<claude_home>/projects/<cwd-slug>/<sid>/subagents/<file_name>`.
+    fn write_subagent(claude_home: &Path, cwd: &str, sid: &str, file_name: &str, contents: &str) {
+        let parent_path = transcript_path(claude_home, cwd, sid);
+        let subagents_dir = parent_path.parent().unwrap().join(sid).join("subagents");
+        fs::create_dir_all(&subagents_dir).unwrap();
+        fs::write(subagents_dir.join(file_name), contents).unwrap();
+    }
+
     const ASSISTANT_LINE: &str = r#"{"type":"assistant","requestId":"r1","uuid":"u1","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"m1","model":"claude-opus-4-7","usage":{"input_tokens":10,"output_tokens":20}}}"#;
+
+    fn make_assistant_line(request_id: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","requestId":"{request_id}","uuid":"u-{request_id}","timestamp":"2025-11-15T10:23:45.000Z","message":{{"id":"msg-{request_id}","model":"claude-opus-4-7","usage":{{"input_tokens":5,"output_tokens":10}}}}}}"#
+        )
+    }
 
     #[test]
     fn loads_full_session_with_transcript() {
@@ -227,5 +330,117 @@ mod tests {
 
         let result = load_session(&payload(sid, cwd), home.path());
         assert_eq!(result.items.len(), 1);
+    }
+
+    // =========================================================================
+    // Subagent tests (TC-A through TC-E)
+    // =========================================================================
+
+    /// TC-A: two subagent files merged under one session.
+    #[test]
+    fn tc_a_two_subagent_files_merged() {
+        let home = tempdir().unwrap();
+        let cwd = "/Users/alice/code";
+        let sid = "tc-a-session";
+        write_session_file(home.path(), sid, cwd);
+        write_transcript(home.path(), cwd, sid, &make_assistant_line("rp"));
+        write_subagent(home.path(), cwd, sid, "agent-1.jsonl", &make_assistant_line("ra"));
+        write_subagent(home.path(), cwd, sid, "agent-2.jsonl", &make_assistant_line("rb"));
+
+        let result = load_session(&payload(sid, cwd), home.path());
+        assert_eq!(result.items.len(), 3, "expected parent + 2 subagent items");
+
+        let ids: Vec<&str> = result.items.iter().map(|i| i.request_id.as_str()).collect();
+        assert!(ids.contains(&"rp"), "parent item missing");
+        assert!(ids.contains(&"ra"), "subagent-1 item missing");
+        assert!(ids.contains(&"rb"), "subagent-2 item missing");
+
+        // Stats should be summed (3 items × 5 input + 10 output each = 15/30).
+        assert_eq!(result.stats.input_tokens, 15);
+        assert_eq!(result.stats.output_tokens, 30);
+    }
+
+    /// TC-B: no subagents dir → no errors, only parent item returned.
+    #[test]
+    fn tc_b_no_subagents_dir_no_errors() {
+        let home = tempdir().unwrap();
+        let cwd = "/Users/alice/code";
+        let sid = "tc-b-session";
+        write_session_file(home.path(), sid, cwd);
+        write_transcript(home.path(), cwd, sid, &make_assistant_line("rp"));
+        // No subagents dir created.
+
+        let result = load_session(&payload(sid, cwd), home.path());
+        assert_eq!(result.items.len(), 1, "expected only parent item");
+    }
+
+    /// TC-C: one bad subagent file does not abort others.
+    #[test]
+    fn tc_c_bad_subagent_file_does_not_abort_others() {
+        let home = tempdir().unwrap();
+        let cwd = "/Users/alice/code";
+        let sid = "tc-c-session";
+        write_session_file(home.path(), sid, cwd);
+        write_transcript(home.path(), cwd, sid, &make_assistant_line("rp"));
+        // agent-1.jsonl is malformed (no valid assistant lines).
+        write_subagent(home.path(), cwd, sid, "agent-1.jsonl", "not json\n{broken");
+        // agent-2.jsonl is valid.
+        write_subagent(home.path(), cwd, sid, "agent-2.jsonl", &make_assistant_line("rb"));
+
+        let result = load_session(&payload(sid, cwd), home.path());
+        assert_eq!(
+            result.items.len(),
+            2,
+            "expected parent + rb (agent-1 malformed, agent-2 valid)"
+        );
+        // WARN logging for agent-1.jsonl is verified in integration tests (hook_errors.rs).
+    }
+
+    /// TC-D: tool-results sibling directory is ignored.
+    #[test]
+    fn tc_d_tool_results_dir_ignored() {
+        let home = tempdir().unwrap();
+        let cwd = "/Users/alice/code";
+        let sid = "tc-d-session";
+        write_session_file(home.path(), sid, cwd);
+        write_transcript(home.path(), cwd, sid, &make_assistant_line("rp"));
+        write_subagent(home.path(), cwd, sid, "agent-1.jsonl", &make_assistant_line("ra"));
+
+        // Create the tool-results sibling directory with a file.
+        let parent_path = transcript_path(home.path(), cwd, sid);
+        let tool_results_dir = parent_path.parent().unwrap().join(sid).join("tool-results");
+        fs::create_dir_all(&tool_results_dir).unwrap();
+        fs::write(tool_results_dir.join("foo.txt"), "some tool result").unwrap();
+
+        let result = load_session(&payload(sid, cwd), home.path());
+        assert_eq!(
+            result.items.len(),
+            2,
+            "expected parent + 1 subagent item; tool-results must be ignored"
+        );
+    }
+
+    /// TC-E: request_id shared between parent and subagent deduplicated by persist.
+    /// This test verifies session_loader merges items (persist handles dedup).
+    #[test]
+    fn tc_e_duplicate_request_id_both_in_items() {
+        let home = tempdir().unwrap();
+        let cwd = "/Users/alice/code";
+        let sid = "tc-e-session";
+        write_session_file(home.path(), sid, cwd);
+        // Parent and subagent both have "rdup" but different message_ids.
+        let parent_line = r#"{"type":"assistant","requestId":"rdup","uuid":"u-parent","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg-parent","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+        let subagent_line = r#"{"type":"assistant","requestId":"rdup","uuid":"u-sub","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg-sub","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+        write_transcript(home.path(), cwd, sid, parent_line);
+        write_subagent(home.path(), cwd, sid, "agent-1.jsonl", subagent_line);
+
+        // load_session returns BOTH items (dedup is persist's job).
+        let result = load_session(&payload(sid, cwd), home.path());
+        assert_eq!(
+            result.items.len(),
+            2,
+            "load_session should return both items; persist handles dedup"
+        );
+        assert!(result.items.iter().all(|i| i.request_id == "rdup"));
     }
 }
