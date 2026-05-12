@@ -46,7 +46,7 @@ fn fallback_session(payload: &HookPayload) -> NewSession {
 /// failures are logged and degrade to a minimal `SessionResult` so the writer
 /// can still persist a session row. The hook is never blocked by I/O.
 pub fn load_session(payload: &HookPayload, claude_home: &Path) -> SessionResult {
-    let session = resolve_session(payload, claude_home);
+    let mut session = resolve_session(payload, claude_home);
 
     let path = transcript_path(claude_home, &payload.cwd, &payload.session_id);
 
@@ -91,6 +91,10 @@ pub fn load_session(payload: &HookPayload, claude_home: &Path) -> SessionResult 
         .join("subagents");
 
     load_subagents(&subagents_dir, &mut items, &mut stats);
+
+    // Set ended_at to the maximum occurred_at across all items (parent + subagents).
+    // If items is empty, max() is None which leaves ended_at as None — by construction.
+    session.ended_at = items.iter().map(|i| i.occurred_at).max();
 
     SessionResult {
         session,
@@ -418,6 +422,73 @@ mod tests {
             2,
             "expected parent + 1 subagent item; tool-results must be ignored"
         );
+    }
+
+    // =========================================================================
+    // C2 tests: session.ended_at is set from items
+    // =========================================================================
+
+    /// C2-T1: single assistant line — session.ended_at equals that item's occurred_at.
+    #[test]
+    fn c2_t1_single_item_ended_at_matches() {
+        let home = tempdir().unwrap();
+        let cwd = "/Users/alice/code";
+        let sid = "c2-t1-session";
+        write_session_file(home.path(), sid, cwd);
+        write_transcript(home.path(), cwd, sid, ASSISTANT_LINE);
+
+        let result = load_session(&payload(sid, cwd), home.path());
+        assert_eq!(result.items.len(), 1);
+        let expected_max = result.items.iter().map(|i| i.occurred_at).max();
+        assert_eq!(result.session.ended_at, expected_max);
+        assert_eq!(result.session.ended_at, Some(result.items[0].occurred_at));
+    }
+
+    /// C2-T2: two lines with different timestamps — max wins.
+    #[test]
+    fn c2_t2_two_items_max_wins() {
+        let home = tempdir().unwrap();
+        let cwd = "/Users/alice/code";
+        let sid = "c2-t2-session";
+        write_session_file(home.path(), sid, cwd);
+        // Two assistant lines with different timestamps.
+        let line_earlier = r#"{"type":"assistant","requestId":"r-early","uuid":"u-early","timestamp":"2025-11-15T10:23:45.000Z","message":{"id":"msg-early","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+        let line_later = r#"{"type":"assistant","requestId":"r-later","uuid":"u-later","timestamp":"2025-11-15T11:00:00.000Z","message":{"id":"msg-later","model":"claude-opus-4-7","usage":{"input_tokens":5,"output_tokens":10}}}"#;
+        write_transcript(
+            home.path(),
+            cwd,
+            sid,
+            &format!("{line_earlier}\n{line_later}"),
+        );
+
+        let result = load_session(&payload(sid, cwd), home.path());
+        assert_eq!(result.items.len(), 2);
+
+        // Find the max occurred_at
+        let max_occurred_at = result.items.iter().map(|i| i.occurred_at).max().unwrap();
+        assert_eq!(result.session.ended_at, Some(max_occurred_at));
+
+        // The later timestamp should be 2025-11-15T11:00:00Z = 1731668400
+        let later_item = result
+            .items
+            .iter()
+            .find(|i| i.request_id == "r-later")
+            .unwrap();
+        assert_eq!(result.session.ended_at, Some(later_item.occurred_at));
+    }
+
+    /// C2-T3: missing transcript — degraded path, ended_at stays None.
+    #[test]
+    fn c2_t3_missing_transcript_ended_at_none() {
+        let home = tempdir().unwrap();
+        let cwd = "/Users/alice/code";
+        let sid = "c2-t3-session";
+        write_session_file(home.path(), sid, cwd);
+        // No transcript written — degraded path.
+
+        let result = load_session(&payload(sid, cwd), home.path());
+        assert!(result.items.is_empty());
+        assert!(result.session.ended_at.is_none(), "degraded path must leave ended_at as None");
     }
 
     /// TC-E: request_id shared between parent and subagent deduplicated by persist.

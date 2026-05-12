@@ -668,17 +668,25 @@ fn tc_d_tool_results_not_mentioned_in_log() {
                 .join("tallytape.sqlite")
         }
     };
+    // Poll for items count to reach 2, not just db existence — `Connection::open`
+    // auto-creates an empty DB, so `db_path.exists()` is not a reliable proxy
+    // for "worker finished writing".
+    use rusqlite::Connection;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !db_path.exists() && Instant::now() < deadline {
+    let mut items: i64 = 0;
+    while Instant::now() < deadline {
+        if db_path.exists() {
+            if let Ok(conn) = Connection::open(&db_path) {
+                items = conn
+                    .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+                    .unwrap_or(0);
+                if items >= 2 {
+                    break;
+                }
+            }
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
-
-    // Verify 2 items in DB (parent + 1 subagent).
-    use rusqlite::Connection;
-    let conn = Connection::open(&db_path).expect("open DB");
-    let items: i64 = conn
-        .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
-        .unwrap_or(0);
     assert_eq!(items, 2, "expected parent + 1 subagent item, got {items}");
 
     // Verify tool-results never mentioned in log.

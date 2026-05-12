@@ -100,6 +100,60 @@ impl SessionRepository {
         Ok(session)
     }
 
+    /// Update a session's `started_at` and `ended_at` via MIN/MAX semantics.
+    ///
+    /// - `started_at` only shrinks: `MIN(current, candidate)`.
+    /// - `ended_at` only grows: `MAX(current, candidate)`, but a `None` candidate
+    ///   never overwrites an existing non-null value.
+    ///
+    /// Returns the updated session row.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no row with `id` exists, or on any database error.
+    pub fn update_lifecycle(
+        &self,
+        id: i64,
+        started_at_candidate: i64,
+        ended_at_candidate: Option<i64>,
+    ) -> anyhow::Result<Session> {
+        let mut conn = self.db.lock();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("SessionRepository::update_lifecycle: begin")?;
+
+        let rows_affected = tx
+            .execute(
+                "UPDATE sessions \
+                 SET started_at = MIN(started_at, ?1), \
+                     ended_at = CASE \
+                         WHEN ?2 IS NULL THEN ended_at \
+                         WHEN ended_at IS NULL THEN ?2 \
+                         ELSE MAX(ended_at, ?2) \
+                     END \
+                 WHERE id = ?3",
+                rusqlite::params![started_at_candidate, ended_at_candidate, id],
+            )
+            .context("SessionRepository::update_lifecycle: update")?;
+
+        if rows_affected != 1 {
+            anyhow::bail!("SessionRepository::update_lifecycle: session id not found: {id}");
+        }
+
+        let session = tx
+            .query_row(
+                "SELECT id, source, external_id, cwd, started_at, ended_at, metadata \
+                 FROM sessions WHERE id = ?1",
+                rusqlite::params![id],
+                Self::map_session_row,
+            )
+            .context("SessionRepository::update_lifecycle: row missing after update")?;
+
+        tx.commit().context("SessionRepository::update_lifecycle: commit")?;
+
+        Ok(session)
+    }
+
     /// Look up a session by `(source, external_id)`.
     ///
     /// Returns `Ok(None)` when no matching row exists.
@@ -359,5 +413,142 @@ mod tests {
             .expect("find_by_id on empty db should not error");
 
         assert_eq!(result, None);
+    }
+
+    // -------------------------------------------------------------------------
+    // C1-T1: None→Some on ended_at, MIN started_at
+    // -------------------------------------------------------------------------
+    #[test]
+    fn update_lifecycle_none_to_some_and_min_started_at() {
+        let db = open_db();
+        let repo = SessionRepository::new(db);
+
+        let s = repo
+            .upsert(NewSession {
+                source: "claude-code".to_string(),
+                external_id: "t1".to_string(),
+                cwd: None,
+                started_at: 1_700_000_500,
+                ended_at: None,
+                metadata: None,
+            })
+            .unwrap();
+
+        let updated = repo
+            .update_lifecycle(s.id, 1_700_000_100, Some(1_700_001_000))
+            .expect("update_lifecycle should succeed");
+
+        assert_eq!(updated.started_at, 1_700_000_100);
+        assert_eq!(updated.ended_at, Some(1_700_001_000));
+    }
+
+    // -------------------------------------------------------------------------
+    // C1-T2: both clamped (no change)
+    // -------------------------------------------------------------------------
+    #[test]
+    fn update_lifecycle_both_clamped_no_change() {
+        let db = open_db();
+        let repo = SessionRepository::new(db);
+
+        let s = repo
+            .upsert(NewSession {
+                source: "claude-code".to_string(),
+                external_id: "t2".to_string(),
+                cwd: None,
+                started_at: 1_700_000_100,
+                ended_at: None,
+                metadata: None,
+            })
+            .unwrap();
+
+        // Establish started_at=1_700_000_100 (candidate matches; MIN stays) and
+        // ended_at=Some(1_700_001_000).
+        repo.update_lifecycle(s.id, 1_700_000_100, Some(1_700_001_000)).unwrap();
+
+        // Second call: neither candidate wins (higher start, lower end)
+        let updated = repo
+            .update_lifecycle(s.id, 1_700_000_500, Some(1_700_000_800))
+            .expect("update_lifecycle should succeed");
+
+        assert_eq!(updated.started_at, 1_700_000_100, "started_at must not grow");
+        assert_eq!(
+            updated.ended_at,
+            Some(1_700_001_000),
+            "ended_at must not shrink"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // C1-T3: None candidate preserves ended_at
+    // -------------------------------------------------------------------------
+    #[test]
+    fn update_lifecycle_none_candidate_preserves_ended_at() {
+        let db = open_db();
+        let repo = SessionRepository::new(db);
+
+        let s = repo
+            .upsert(NewSession {
+                source: "claude-code".to_string(),
+                external_id: "t3".to_string(),
+                cwd: None,
+                started_at: 1_700_000_100,
+                ended_at: None,
+                metadata: None,
+            })
+            .unwrap();
+
+        // Establish started_at=1_700_000_100 and ended_at=Some(1_700_001_000)
+        repo.update_lifecycle(s.id, 1_700_000_100, Some(1_700_001_000)).unwrap();
+
+        // Pass None for ended_at_candidate — must not clear ended_at
+        // Also shrink started_at to 1_700_000_050
+        let updated = repo
+            .update_lifecycle(s.id, 1_700_000_050, None)
+            .expect("update_lifecycle should succeed");
+
+        assert_eq!(updated.started_at, 1_700_000_050);
+        assert_eq!(
+            updated.ended_at,
+            Some(1_700_001_000),
+            "ended_at must be unchanged when candidate is None"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // C1-T4: None→Some path
+    // -------------------------------------------------------------------------
+    #[test]
+    fn update_lifecycle_null_ended_at_gets_set() {
+        let db = open_db();
+        let repo = SessionRepository::new(db);
+
+        let s = repo
+            .upsert(NewSession {
+                source: "claude-code".to_string(),
+                external_id: "t4".to_string(),
+                cwd: None,
+                started_at: 1_700_000_100,
+                ended_at: None,
+                metadata: None,
+            })
+            .unwrap();
+
+        let updated = repo
+            .update_lifecycle(s.id, 1_700_000_100, Some(1_700_002_000))
+            .expect("update_lifecycle should succeed");
+
+        assert_eq!(updated.ended_at, Some(1_700_002_000));
+    }
+
+    // -------------------------------------------------------------------------
+    // C1-T5: unknown id returns Err
+    // -------------------------------------------------------------------------
+    #[test]
+    fn update_lifecycle_unknown_id_returns_err() {
+        let db = open_db();
+        let repo = SessionRepository::new(db);
+
+        let result = repo.update_lifecycle(999_999, 1_700_000_000, None);
+        assert!(result.is_err(), "update_lifecycle with unknown id must return Err");
     }
 }

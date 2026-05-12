@@ -14,5 +14,4 @@ serde_json = "1"
 tallytape-core = { path = "../tallytape-core" }
 
 [dev-dependencies]
-rusqlite = { version = "0.39.0", features = ["bundled"] }
 tempfile = "3"

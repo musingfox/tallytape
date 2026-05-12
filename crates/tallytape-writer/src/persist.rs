@@ -31,18 +31,26 @@ pub fn persist(result: SessionResult) -> anyhow::Result<PersistOutcome> {
 
 /// Core persist logic. Accepts an already-opened `Database` so tests can
 /// inject a temp-dir database without touching the real user data directory.
-pub(crate) fn persist_with_db(
+#[doc(hidden)]
+pub fn persist_with_db(
     db: &Database,
     result: SessionResult,
 ) -> anyhow::Result<PersistOutcome> {
     let external_id = result.session.external_id.clone();
-    let session = SessionRepository::new(db.clone())
+    let started_candidate = result.session.started_at;
+    let ended_candidate = result.session.ended_at;
+    let session_repo = SessionRepository::new(db.clone());
+    let session = session_repo
         .upsert(result.session)
         .map_err(|e| {
             log::error!("upsert session {external_id} failed: {e}");
             e
         })?;
     let session_id = session.id;
+
+    if let Err(err) = session_repo.update_lifecycle(session_id, started_candidate, ended_candidate) {
+        log::warn!("update_lifecycle failed: {err}");
+    }
     log::debug!(
         "persisting session {} with {} items, stats={:?}",
         session_id,
@@ -135,6 +143,7 @@ mod tests {
     use super::*;
     use tallytape_core::{NewSession, ParsedItem, SessionRepository, TokenStats};
     use tempfile::tempdir;
+    use rusqlite;
 
     fn make_session(external_id: &str) -> NewSession {
         NewSession {
@@ -394,6 +403,142 @@ mod tests {
         assert_eq!(outcome.inserted, 1, "first rdup inserted");
         assert_eq!(outcome.skipped_duplicates, 1, "second rdup is duplicate");
         assert_eq!(count_items(&db), 1);
+    }
+
+    fn query_session_by_external_id(db: &Database, external_id: &str) -> (i64, Option<i64>) {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT started_at, ended_at FROM sessions WHERE source = 'claude-code' AND external_id = ?1",
+            rusqlite::params![external_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("session must exist")
+    }
+
+    // C3-T1: two persists update lifecycle (started_at shrinks, ended_at grows)
+    #[test]
+    fn c3_t1_two_persists_update_lifecycle() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("c3t1.db")).unwrap();
+
+        // Persist 1
+        let result1 = SessionResult {
+            session: NewSession {
+                source: "claude-code".to_string(),
+                external_id: "c3-session".to_string(),
+                cwd: None,
+                started_at: 1_700_000_500,
+                ended_at: Some(1_700_001_000),
+                metadata: None,
+            },
+            items: vec![ParsedItem {
+                request_id: "r1".to_string(),
+                message_id: Some("msg-r1".to_string()),
+                parent_uuid: None,
+                is_sidechain: false,
+                occurred_at: 1_700_001_000,
+                model: "claude-opus-4-7".to_string(),
+                service_tier: None,
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                metadata: None,
+            }],
+            stats: TokenStats::default(),
+        };
+        let out1 = persist_with_db(&db, result1).expect("persist 1 should succeed");
+        assert_eq!(out1.inserted, 1);
+        assert_eq!(out1.skipped_duplicates, 0);
+
+        // Persist 2: earlier start, later end, new item
+        let result2 = SessionResult {
+            session: NewSession {
+                source: "claude-code".to_string(),
+                external_id: "c3-session".to_string(),
+                cwd: None,
+                started_at: 1_700_000_100,
+                ended_at: Some(1_700_002_000),
+                metadata: None,
+            },
+            items: vec![ParsedItem {
+                request_id: "r2".to_string(),
+                message_id: Some("msg-r2".to_string()),
+                parent_uuid: None,
+                is_sidechain: false,
+                occurred_at: 1_700_002_000,
+                model: "claude-opus-4-7".to_string(),
+                service_tier: None,
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                metadata: None,
+            }],
+            stats: TokenStats::default(),
+        };
+        let out2 = persist_with_db(&db, result2).expect("persist 2 should succeed");
+        assert_eq!(out2.inserted, 1);
+        assert_eq!(out2.skipped_duplicates, 0);
+
+        // Assert lifecycle was updated
+        let (started_at, ended_at) = query_session_by_external_id(&db, "c3-session");
+        assert_eq!(started_at, 1_700_000_100, "started_at should have shrunk to 1_700_000_100");
+        assert_eq!(ended_at, Some(1_700_002_000), "ended_at should have grown to 1_700_002_000");
+    }
+
+    // C3-T2: None ended_at on second persist preserves prior ended_at
+    #[test]
+    fn c3_t2_none_ended_at_preserves_prior() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(dir.path().join("c3t2.db")).unwrap();
+
+        // Persist 1 to establish ended_at
+        let result1 = SessionResult {
+            session: NewSession {
+                source: "claude-code".to_string(),
+                external_id: "c3t2-session".to_string(),
+                cwd: None,
+                started_at: 1_700_000_500,
+                ended_at: Some(1_700_001_000),
+                metadata: None,
+            },
+            items: vec![ParsedItem {
+                request_id: "r1".to_string(),
+                message_id: Some("msg-r1".to_string()),
+                parent_uuid: None,
+                is_sidechain: false,
+                occurred_at: 1_700_001_000,
+                model: "claude-opus-4-7".to_string(),
+                service_tier: None,
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                metadata: None,
+            }],
+            stats: TokenStats::default(),
+        };
+        persist_with_db(&db, result1).expect("persist 1 should succeed");
+
+        // Persist 2 with None ended_at and no items
+        let result2 = SessionResult {
+            session: NewSession {
+                source: "claude-code".to_string(),
+                external_id: "c3t2-session".to_string(),
+                cwd: None,
+                started_at: 1_700_000_100,
+                ended_at: None,
+                metadata: None,
+            },
+            items: vec![],
+            stats: TokenStats::default(),
+        };
+        persist_with_db(&db, result2).expect("persist 2 should succeed");
+
+        // ended_at should still be Some(1_700_001_000)
+        let (_, ended_at) = query_session_by_external_id(&db, "c3t2-session");
+        assert_eq!(ended_at, Some(1_700_001_000), "ended_at must not be cleared by None candidate");
     }
 
     // Test 5: cache tokens pass through correctly

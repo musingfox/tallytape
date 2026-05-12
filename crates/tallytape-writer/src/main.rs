@@ -1,20 +1,16 @@
-mod cli;
-mod detach;
-mod error_log;
-mod log_subscriber;
-mod payload;
-mod persist;
-mod session_loader;
-
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command};
-use crate::payload::parse_payload;
-use crate::session_loader::load_session;
+use tallytape_writer::cli::{Cli, Command};
+use tallytape_writer::payload::parse_payload;
+use tallytape_writer::session_loader::load_session;
+use tallytape_writer::persist;
+use tallytape_writer::detach;
+use tallytape_writer::error_log;
+use tallytape_writer::log_subscriber;
 
 fn claude_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude"))
