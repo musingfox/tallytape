@@ -63,7 +63,10 @@ mod tests {
         let size = std::fs::metadata(&path).unwrap().len();
         assert!(size < 2048, "file should be truncated, got {size} bytes");
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.ends_with("x\n"), "file should end with appended line");
+        assert!(
+            contents.ends_with("x\n"),
+            "file should end with appended line"
+        );
     }
 
     #[test]
@@ -72,7 +75,10 @@ mod tests {
         let path = dir.path().join("nonexistent_subdir").join("writer.log");
         // Must not panic; file is not created because parent dir doesn't exist
         append_line(&path, "y\n");
-        assert!(!path.exists(), "file should NOT be created when parent dir missing");
+        assert!(
+            !path.exists(),
+            "file should NOT be created when parent dir missing"
+        );
     }
 
     #[test]

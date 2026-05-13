@@ -149,7 +149,8 @@ impl SessionRepository {
             )
             .context("SessionRepository::update_lifecycle: row missing after update")?;
 
-        tx.commit().context("SessionRepository::update_lifecycle: commit")?;
+        tx.commit()
+            .context("SessionRepository::update_lifecycle: commit")?;
 
         Ok(session)
     }
@@ -463,14 +464,18 @@ mod tests {
 
         // Establish started_at=1_700_000_100 (candidate matches; MIN stays) and
         // ended_at=Some(1_700_001_000).
-        repo.update_lifecycle(s.id, 1_700_000_100, Some(1_700_001_000)).unwrap();
+        repo.update_lifecycle(s.id, 1_700_000_100, Some(1_700_001_000))
+            .unwrap();
 
         // Second call: neither candidate wins (higher start, lower end)
         let updated = repo
             .update_lifecycle(s.id, 1_700_000_500, Some(1_700_000_800))
             .expect("update_lifecycle should succeed");
 
-        assert_eq!(updated.started_at, 1_700_000_100, "started_at must not grow");
+        assert_eq!(
+            updated.started_at, 1_700_000_100,
+            "started_at must not grow"
+        );
         assert_eq!(
             updated.ended_at,
             Some(1_700_001_000),
@@ -498,7 +503,8 @@ mod tests {
             .unwrap();
 
         // Establish started_at=1_700_000_100 and ended_at=Some(1_700_001_000)
-        repo.update_lifecycle(s.id, 1_700_000_100, Some(1_700_001_000)).unwrap();
+        repo.update_lifecycle(s.id, 1_700_000_100, Some(1_700_001_000))
+            .unwrap();
 
         // Pass None for ended_at_candidate — must not clear ended_at
         // Also shrink started_at to 1_700_000_050
@@ -549,6 +555,9 @@ mod tests {
         let repo = SessionRepository::new(db);
 
         let result = repo.update_lifecycle(999_999, 1_700_000_000, None);
-        assert!(result.is_err(), "update_lifecycle with unknown id must return Err");
+        assert!(
+            result.is_err(),
+            "update_lifecycle with unknown id must return Err"
+        );
     }
 }

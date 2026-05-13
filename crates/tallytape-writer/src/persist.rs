@@ -32,23 +32,19 @@ pub fn persist(result: SessionResult) -> anyhow::Result<PersistOutcome> {
 /// Core persist logic. Accepts an already-opened `Database` so tests can
 /// inject a temp-dir database without touching the real user data directory.
 #[doc(hidden)]
-pub fn persist_with_db(
-    db: &Database,
-    result: SessionResult,
-) -> anyhow::Result<PersistOutcome> {
+pub fn persist_with_db(db: &Database, result: SessionResult) -> anyhow::Result<PersistOutcome> {
     let external_id = result.session.external_id.clone();
     let started_candidate = result.session.started_at;
     let ended_candidate = result.session.ended_at;
     let session_repo = SessionRepository::new(db.clone());
-    let session = session_repo
-        .upsert(result.session)
-        .map_err(|e| {
-            log::error!("upsert session {external_id} failed: {e}");
-            e
-        })?;
+    let session = session_repo.upsert(result.session).map_err(|e| {
+        log::error!("upsert session {external_id} failed: {e}");
+        e
+    })?;
     let session_id = session.id;
 
-    if let Err(err) = session_repo.update_lifecycle(session_id, started_candidate, ended_candidate) {
+    if let Err(err) = session_repo.update_lifecycle(session_id, started_candidate, ended_candidate)
+    {
         log::warn!("update_lifecycle failed: {err}");
     }
     log::debug!(
@@ -141,9 +137,9 @@ fn is_unique_constraint_violation(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite;
     use tallytape_core::{NewSession, ParsedItem, SessionRepository, TokenStats};
     use tempfile::tempdir;
-    use rusqlite;
 
     fn make_session(external_id: &str) -> NewSession {
         NewSession {
@@ -346,16 +342,19 @@ mod tests {
         };
 
         let err = persist_with_db(&db, result);
-        assert!(err.is_err(), "persist_with_db should fail when sessions table is missing");
+        assert!(
+            err.is_err(),
+            "persist_with_db should fail when sessions table is missing"
+        );
 
         // Check captured log messages if the capture logger was successfully installed.
         // If a logger was already set (e.g. FileLogger in integration test binary),
         // we accept that and only verify the error propagated (done above).
         let msgs = captured.lock().unwrap();
         if !msgs.is_empty() {
-            let logged_upsert = msgs.iter().any(|m| {
-                m.contains("upsert") && m.contains("upsert-fail-ext-id")
-            });
+            let logged_upsert = msgs
+                .iter()
+                .any(|m| m.contains("upsert") && m.contains("upsert-fail-ext-id"));
             assert!(
                 logged_upsert,
                 "expected error log with 'upsert' and 'upsert-fail-ext-id', got: {:?}",
@@ -483,8 +482,15 @@ mod tests {
 
         // Assert lifecycle was updated
         let (started_at, ended_at) = query_session_by_external_id(&db, "c3-session");
-        assert_eq!(started_at, 1_700_000_100, "started_at should have shrunk to 1_700_000_100");
-        assert_eq!(ended_at, Some(1_700_002_000), "ended_at should have grown to 1_700_002_000");
+        assert_eq!(
+            started_at, 1_700_000_100,
+            "started_at should have shrunk to 1_700_000_100"
+        );
+        assert_eq!(
+            ended_at,
+            Some(1_700_002_000),
+            "ended_at should have grown to 1_700_002_000"
+        );
     }
 
     // C3-T2: None ended_at on second persist preserves prior ended_at
@@ -538,7 +544,11 @@ mod tests {
 
         // ended_at should still be Some(1_700_001_000)
         let (_, ended_at) = query_session_by_external_id(&db, "c3t2-session");
-        assert_eq!(ended_at, Some(1_700_001_000), "ended_at must not be cleared by None candidate");
+        assert_eq!(
+            ended_at,
+            Some(1_700_001_000),
+            "ended_at must not be cleared by None candidate"
+        );
     }
 
     // Test 5: cache tokens pass through correctly

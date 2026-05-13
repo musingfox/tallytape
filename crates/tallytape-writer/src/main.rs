@@ -5,12 +5,12 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use tallytape_writer::cli::{Cli, Command};
-use tallytape_writer::payload::parse_payload;
-use tallytape_writer::session_loader::load_session;
-use tallytape_writer::persist;
 use tallytape_writer::detach;
 use tallytape_writer::error_log;
 use tallytape_writer::log_subscriber;
+use tallytape_writer::payload::parse_payload;
+use tallytape_writer::persist;
+use tallytape_writer::session_loader::load_session;
 
 fn claude_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude"))
@@ -96,7 +96,11 @@ fn main() -> ExitCode {
                     ]
                 }
             });
-            println!("{}", serde_json::to_string_pretty(&snippet).expect("static json! value always serializes"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&snippet)
+                    .expect("static json! value always serializes")
+            );
             ExitCode::SUCCESS
         }
     }

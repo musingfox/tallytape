@@ -88,7 +88,13 @@ fn make_assistant_jsonl_line(request_id: &str) -> String {
 }
 
 /// Write subagent transcript at `<home>/.claude/projects/<slug>/<sid>/subagents/<file_name>`.
-fn write_subagent_transcript(home: &TempDir, slug: &str, sid: &str, file_name: &str, contents: &str) {
+fn write_subagent_transcript(
+    home: &TempDir,
+    slug: &str,
+    sid: &str,
+    file_name: &str,
+    contents: &str,
+) {
     let subagents_dir = home
         .path()
         .join(".claude")
@@ -169,7 +175,13 @@ fn worker_ingests_subagent_transcripts_under_parent_session() {
     // Compute slug (same logic as tallytape_core::slugify_cwd).
     let slug: String = cwd
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
 
     // Add two subagent transcript files.
@@ -212,17 +224,18 @@ fn worker_ingests_subagent_transcripts_under_parent_session() {
 
     // 3 items total: 1 parent + 2 subagents.
     let items = count_rows(&db_path, "items");
-    assert_eq!(items, 3, "expected 3 item rows (parent + 2 subagents), got {items}");
+    assert_eq!(
+        items, 3,
+        "expected 3 item rows (parent + 2 subagents), got {items}"
+    );
 
     // All 3 items must share the same session_id row.
     use rusqlite::Connection;
     let conn = Connection::open(&db_path).expect("open DB");
     let distinct_session_ids: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT session_id) FROM items",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(DISTINCT session_id) FROM items", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(
         distinct_session_ids, 1,

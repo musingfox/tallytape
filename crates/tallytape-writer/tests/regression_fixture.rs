@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use rusqlite::Connection;
-use tallytape_core::{Database, NewSession, TokenStats, parse_transcript_file_with_stats};
+use tallytape_core::{parse_transcript_file_with_stats, Database, NewSession, TokenStats};
 use tallytape_writer::{persist_with_db, SessionResult};
 use tempfile::tempdir;
 
@@ -104,8 +104,8 @@ fn cost_fixture_regression() {
     let db = Database::open(&db_path).expect("Database::open should succeed");
 
     // --- TC4: first persist — 3 inserted, 1 dup (req-A collision on UNIQUE(source,request_id)) ---
-    let outcome = persist_with_db(&db, session_result.clone())
-        .expect("first persist_with_db should succeed");
+    let outcome =
+        persist_with_db(&db, session_result.clone()).expect("first persist_with_db should succeed");
 
     assert_eq!(
         outcome.inserted, 3,
@@ -146,12 +146,10 @@ fn cost_fixture_regression() {
     }
 
     // --- TC5: second persist on same SessionResult → all 4 items skipped ---
-    let outcome2 = persist_with_db(&db, session_result).expect("second persist_with_db should succeed");
+    let outcome2 =
+        persist_with_db(&db, session_result).expect("second persist_with_db should succeed");
 
-    assert_eq!(
-        outcome2.inserted, 0,
-        "TC5: expected 0 inserted on rerun"
-    );
+    assert_eq!(outcome2.inserted, 0, "TC5: expected 0 inserted on rerun");
     assert_eq!(
         outcome2.skipped_duplicates, 4,
         "TC5: expected 4 skipped duplicates on rerun (all 4 items hit UNIQUE constraint)"

@@ -26,8 +26,7 @@ fn install_hook_outputs_valid_json_snippet() {
 
     // stdout must parse as JSON
     let stdout = String::from_utf8(output.stdout).expect("stdout is not valid UTF-8");
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("stdout is not valid JSON");
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is not valid JSON");
 
     // matcher == ""
     assert_eq!(

@@ -113,10 +113,7 @@ fn load_subagents(subagents_dir: &Path, items: &mut Vec<ParsedItem>, stats: &mut
             return;
         }
         Err(e) => {
-            log::warn!(
-                "read_dir({}) failed: {e}",
-                subagents_dir.display()
-            );
+            log::warn!("read_dir({}) failed: {e}", subagents_dir.display());
             return;
         }
     };
@@ -140,10 +137,7 @@ fn load_subagents(subagents_dir: &Path, items: &mut Vec<ParsedItem>, stats: &mut
     for subagent_path in subagent_paths {
         // wait_for_flush is advisory; on failure warn but still attempt parse.
         if let Err(e) = wait_for_flush(&subagent_path, FLUSH_STABLE_MS, FLUSH_MAX_MS) {
-            log::warn!(
-                "wait_for_flush({}) failed: {e}",
-                subagent_path.display()
-            );
+            log::warn!("wait_for_flush({}) failed: {e}", subagent_path.display());
         }
 
         match parse_transcript_file_with_stats(&subagent_path) {
@@ -166,10 +160,7 @@ fn load_subagents(subagents_dir: &Path, items: &mut Vec<ParsedItem>, stats: &mut
                 items.extend(parsed.items);
             }
             Err(e) => {
-                log::warn!(
-                    "parse subagent {} failed: {e}",
-                    subagent_path.display()
-                );
+                log::warn!("parse subagent {} failed: {e}", subagent_path.display());
             }
         }
     }
@@ -348,8 +339,20 @@ mod tests {
         let sid = "tc-a-session";
         write_session_file(home.path(), sid, cwd);
         write_transcript(home.path(), cwd, sid, &make_assistant_line("rp"));
-        write_subagent(home.path(), cwd, sid, "agent-1.jsonl", &make_assistant_line("ra"));
-        write_subagent(home.path(), cwd, sid, "agent-2.jsonl", &make_assistant_line("rb"));
+        write_subagent(
+            home.path(),
+            cwd,
+            sid,
+            "agent-1.jsonl",
+            &make_assistant_line("ra"),
+        );
+        write_subagent(
+            home.path(),
+            cwd,
+            sid,
+            "agent-2.jsonl",
+            &make_assistant_line("rb"),
+        );
 
         let result = load_session(&payload(sid, cwd), home.path());
         assert_eq!(result.items.len(), 3, "expected parent + 2 subagent items");
@@ -389,7 +392,13 @@ mod tests {
         // agent-1.jsonl is malformed (no valid assistant lines).
         write_subagent(home.path(), cwd, sid, "agent-1.jsonl", "not json\n{broken");
         // agent-2.jsonl is valid.
-        write_subagent(home.path(), cwd, sid, "agent-2.jsonl", &make_assistant_line("rb"));
+        write_subagent(
+            home.path(),
+            cwd,
+            sid,
+            "agent-2.jsonl",
+            &make_assistant_line("rb"),
+        );
 
         let result = load_session(&payload(sid, cwd), home.path());
         assert_eq!(
@@ -408,7 +417,13 @@ mod tests {
         let sid = "tc-d-session";
         write_session_file(home.path(), sid, cwd);
         write_transcript(home.path(), cwd, sid, &make_assistant_line("rp"));
-        write_subagent(home.path(), cwd, sid, "agent-1.jsonl", &make_assistant_line("ra"));
+        write_subagent(
+            home.path(),
+            cwd,
+            sid,
+            "agent-1.jsonl",
+            &make_assistant_line("ra"),
+        );
 
         // Create the tool-results sibling directory with a file.
         let parent_path = transcript_path(home.path(), cwd, sid);
@@ -488,7 +503,10 @@ mod tests {
 
         let result = load_session(&payload(sid, cwd), home.path());
         assert!(result.items.is_empty());
-        assert!(result.session.ended_at.is_none(), "degraded path must leave ended_at as None");
+        assert!(
+            result.session.ended_at.is_none(),
+            "degraded path must leave ended_at as None"
+        );
     }
 
     /// TC-E: request_id shared between parent and subagent deduplicated by persist.

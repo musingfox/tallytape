@@ -181,8 +181,7 @@ fn t1_error_logged_for_missing_transcript() {
     let home = TempDir::new().expect("tempdir for fake HOME");
     let log_path = expected_log_path(&home);
 
-    let payload =
-        r#"{"session_id":"bogus-sid-xyz","cwd":"/tmp/no-such-cwd-p2-9"}"#;
+    let payload = r#"{"session_id":"bogus-sid-xyz","cwd":"/tmp/no-such-cwd-p2-9"}"#;
 
     let bin = env!("CARGO_BIN_EXE_tallytape-writer");
 
@@ -251,7 +250,9 @@ fn t1b_error_logged_for_parse_failure() {
     // Build transcript path that the writer will look for.
     let claude_home = home.path().join(".claude");
     let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
-    let transcript_dir = transcript_file.parent().expect("transcript_file has parent");
+    let transcript_dir = transcript_file
+        .parent()
+        .expect("transcript_file has parent");
     fs::create_dir_all(transcript_dir).expect("create transcript dir");
     // Write content, then make the file unreadable so File::open fails.
     fs::write(&transcript_file, "not json line\n{also broken\n").expect("write transcript");
@@ -329,7 +330,9 @@ fn t2_no_info_logged_at_default_warn_level() {
     let claude_home = home.path().join(".claude");
     // Compute transcript path using tallytape_core's canonical function.
     let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
-    let transcript_dir = transcript_file.parent().expect("transcript_file has parent");
+    let transcript_dir = transcript_file
+        .parent()
+        .expect("transcript_file has parent");
     fs::create_dir_all(transcript_dir).expect("create transcript dir");
 
     // One valid assistant line
@@ -358,13 +361,15 @@ fn t2_no_info_logged_at_default_warn_level() {
     // Wait a generous time for the worker to finish, then check log.
     // We wait for the DB to appear as a proxy that the worker completed.
     #[cfg(target_os = "macos")]
-    let db_path = home.path()
+    let db_path = home
+        .path()
         .join("Library")
         .join("Application Support")
         .join("tallytape")
         .join("tallytape.sqlite");
     #[cfg(not(target_os = "macos"))]
-    let db_path = home.path()
+    let db_path = home
+        .path()
         .join(".local")
         .join("share")
         .join("tallytape")
@@ -400,8 +405,7 @@ fn t4_truncation_before_error_logged() {
     let big = vec![b'x'; 1_572_864];
     fs::write(&log_path, &big).expect("pre-fill writer.log");
 
-    let payload =
-        r#"{"session_id":"bogus-sid-xyz","cwd":"/tmp/no-such-cwd-p2-9"}"#;
+    let payload = r#"{"session_id":"bogus-sid-xyz","cwd":"/tmp/no-such-cwd-p2-9"}"#;
 
     let bin = env!("CARGO_BIN_EXE_tallytape-writer");
 
@@ -466,7 +470,11 @@ fn tc_c_malformed_subagent_warns_in_log() {
     let session_json = format!(
         r#"{{"sessionId":"{session_id}","cwd":"{cwd}","startedAt":1700000000000,"updatedAt":1700000000000}}"#
     );
-    fs::write(sessions_dir.join(format!("{session_id}.json")), &session_json).unwrap();
+    fs::write(
+        sessions_dir.join(format!("{session_id}.json")),
+        &session_json,
+    )
+    .unwrap();
 
     // Write parent transcript.
     let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
@@ -534,7 +542,11 @@ fn tc_b_no_subagents_dir_no_warn_in_log() {
     let session_json = format!(
         r#"{{"sessionId":"{session_id}","cwd":"{cwd}","startedAt":1700000000000,"updatedAt":1700000000000}}"#
     );
-    fs::write(sessions_dir.join(format!("{session_id}.json")), &session_json).unwrap();
+    fs::write(
+        sessions_dir.join(format!("{session_id}.json")),
+        &session_json,
+    )
+    .unwrap();
 
     // Write parent transcript only — no <sid>/subagents/ dir.
     let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);
@@ -610,7 +622,11 @@ fn tc_d_tool_results_not_mentioned_in_log() {
     let session_json = format!(
         r#"{{"sessionId":"{session_id}","cwd":"{cwd}","startedAt":1700000000000,"updatedAt":1700000000000}}"#
     );
-    fs::write(sessions_dir.join(format!("{session_id}.json")), &session_json).unwrap();
+    fs::write(
+        sessions_dir.join(format!("{session_id}.json")),
+        &session_json,
+    )
+    .unwrap();
 
     // Write parent transcript.
     let transcript_file = tallytape_core::transcript_path(&claude_home, cwd, session_id);

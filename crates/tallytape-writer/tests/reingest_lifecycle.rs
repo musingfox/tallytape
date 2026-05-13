@@ -26,7 +26,11 @@ fn make_item(request_id: &str, occurred_at: i64) -> ParsedItem {
     }
 }
 
-fn query_session_lifecycle(conn: &Connection, source: &str, external_id: &str) -> (i64, Option<i64>) {
+fn query_session_lifecycle(
+    conn: &Connection,
+    source: &str,
+    external_id: &str,
+) -> (i64, Option<i64>) {
     conn.query_row(
         "SELECT started_at, ended_at FROM sessions WHERE source = ?1 AND external_id = ?2",
         rusqlite::params![source, external_id],
@@ -69,7 +73,10 @@ fn reingest_lifecycle_repairs_started_advances_ended() {
 
     let out1 = persist_with_db(&db, result1).expect("first persist should succeed");
     assert_eq!(out1.inserted, 2, "persist 1: expected 2 items inserted");
-    assert_eq!(out1.skipped_duplicates, 0, "persist 1: expected 0 duplicates");
+    assert_eq!(
+        out1.skipped_duplicates, 0,
+        "persist 1: expected 0 duplicates"
+    );
 
     // --- Persist #2: corrected started_at, advanced ended_at, same r1/r2 + new r3 ---
     let result2 = SessionResult {
@@ -91,13 +98,15 @@ fn reingest_lifecycle_repairs_started_advances_ended() {
 
     let out2 = persist_with_db(&db, result2).expect("second persist should succeed");
     assert_eq!(out2.inserted, 1, "persist 2: expected 1 new item (r3)");
-    assert_eq!(out2.skipped_duplicates, 2, "persist 2: expected 2 duplicates (r1, r2)");
+    assert_eq!(
+        out2.skipped_duplicates, 2,
+        "persist 2: expected 2 duplicates (r1, r2)"
+    );
 
     // --- Verify session lifecycle via raw rusqlite ---
     let conn = Connection::open(&db_path).expect("raw rusqlite connection should open");
 
-    let (started_at, ended_at) =
-        query_session_lifecycle(&conn, "claude-code", "reingest-session");
+    let (started_at, ended_at) = query_session_lifecycle(&conn, "claude-code", "reingest-session");
 
     assert_eq!(
         started_at, 1_700_000_500,
@@ -111,5 +120,8 @@ fn reingest_lifecycle_repairs_started_advances_ended() {
 
     // --- Verify total item count ---
     let item_count = count_items(&conn);
-    assert_eq!(item_count, 3, "exactly 3 distinct items must exist (r1, r2, r3)");
+    assert_eq!(
+        item_count, 3,
+        "exactly 3 distinct items must exist (r1, r2, r3)"
+    );
 }
