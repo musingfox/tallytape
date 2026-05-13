@@ -14,7 +14,21 @@ const RECEIPT_ADDED_EVENT: &str = "receipt-added";
 const RECEIPT_UPDATED_EVENT: &str = "receipt-updated";
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
 
-type AppResult<T> = Result<T, String>;
+type AppResult<T> = Result<T, AppError>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppError {
+    pub message: String,
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(error: anyhow::Error) -> Self {
+        Self {
+            message: error.to_string(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -190,15 +204,12 @@ fn list_receipts(
     state: State<'_, AppState>,
     date_range: Option<DateRange>,
 ) -> AppResult<Vec<ReceiptDto>> {
-    state
-        .backend
-        .list_receipts(date_range)
-        .map_err(error_string)
+    state.backend.list_receipts(date_range).map_err(app_error)
 }
 
 #[tauri::command]
 fn get_receipt(state: State<'_, AppState>, id: i64) -> AppResult<Option<ReceiptDto>> {
-    state.backend.get_receipt(id).map_err(error_string)
+    state.backend.get_receipt(id).map_err(app_error)
 }
 
 #[tauri::command]
@@ -206,11 +217,11 @@ fn list_items_by_receipt(state: State<'_, AppState>, receipt_id: i64) -> AppResu
     state
         .backend
         .list_items_by_receipt(receipt_id)
-        .map_err(error_string)
+        .map_err(app_error)
 }
 
-fn error_string(error: anyhow::Error) -> String {
-    error.to_string()
+fn app_error(error: anyhow::Error) -> AppError {
+    error.into()
 }
 
 fn start_receipt_watcher(
@@ -365,6 +376,13 @@ mod tests {
                 metadata: None,
             })
             .unwrap();
+    }
+
+    #[test]
+    fn app_error_contains_error_message() {
+        let error = AppError::from(anyhow::anyhow!("query failed"));
+
+        assert_eq!(error.message, "query failed");
     }
 
     #[test]
