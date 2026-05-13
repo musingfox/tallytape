@@ -236,10 +236,8 @@ fn start_receipt_watcher(
     let watched_paths = watched_database_paths(&database_path);
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-        if let Ok(event) = result {
-            if event.paths.iter().any(|path| watched_paths.contains(path)) {
-                let _ = tx.send(());
-            }
+        if event_touches_watched_database(&result, &watched_paths) {
+            let _ = tx.send(());
         }
     })
     .context("failed to create receipt database watcher")?;
@@ -260,6 +258,16 @@ fn watched_database_paths(database_path: &Path) -> Vec<PathBuf> {
         PathBuf::from(format!("{}-wal", db.display())),
         PathBuf::from(format!("{}-shm", db.display())),
     ]
+}
+
+fn event_touches_watched_database(
+    result: &notify::Result<notify::Event>,
+    watched_paths: &[PathBuf],
+) -> bool {
+    result
+        .as_ref()
+        .map(|event| event.paths.iter().any(|path| watched_paths.contains(path)))
+        .unwrap_or(false)
 }
 
 fn run_debounced_receipt_scanner(app: AppHandle, backend: Arc<AppBackend>, rx: mpsc::Receiver<()>) {
@@ -376,6 +384,56 @@ mod tests {
                 metadata: None,
             })
             .unwrap();
+    }
+
+    fn event_with_paths(paths: Vec<PathBuf>) -> notify::Result<notify::Event> {
+        let mut event = notify::Event::new(notify::EventKind::Any);
+        event.paths = paths;
+        Ok(event)
+    }
+
+    #[test]
+    fn watched_database_paths_include_db_wal_and_shm() {
+        let db_path = PathBuf::from("/tmp/tallytape.sqlite");
+
+        assert_eq!(
+            watched_database_paths(&db_path),
+            vec![
+                PathBuf::from("/tmp/tallytape.sqlite"),
+                PathBuf::from("/tmp/tallytape.sqlite-wal"),
+                PathBuf::from("/tmp/tallytape.sqlite-shm"),
+            ]
+        );
+    }
+
+    #[test]
+    fn event_path_filter_matches_db_wal_and_shm_only() {
+        let watched_paths = watched_database_paths(&PathBuf::from("/tmp/tallytape.sqlite"));
+
+        assert!(event_touches_watched_database(
+            &event_with_paths(vec![PathBuf::from("/tmp/tallytape.sqlite")]),
+            &watched_paths,
+        ));
+        assert!(event_touches_watched_database(
+            &event_with_paths(vec![PathBuf::from("/tmp/tallytape.sqlite-wal")]),
+            &watched_paths,
+        ));
+        assert!(event_touches_watched_database(
+            &event_with_paths(vec![PathBuf::from("/tmp/tallytape.sqlite-shm")]),
+            &watched_paths,
+        ));
+        assert!(!event_touches_watched_database(
+            &event_with_paths(vec![PathBuf::from("/tmp/other.sqlite")]),
+            &watched_paths,
+        ));
+    }
+
+    #[test]
+    fn event_path_filter_ignores_notify_errors() {
+        let watched_paths = watched_database_paths(&PathBuf::from("/tmp/tallytape.sqlite"));
+        let error = Err(notify::Error::generic("watch failed"));
+
+        assert!(!event_touches_watched_database(&error, &watched_paths));
     }
 
     #[test]

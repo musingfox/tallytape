@@ -181,6 +181,26 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn unique_constraint_violation_classifier_distinguishes_error_kinds() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("unique.db");
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch("CREATE TABLE t (value TEXT UNIQUE);")
+            .unwrap();
+        conn.execute("INSERT INTO t (value) VALUES ('dup')", [])
+            .unwrap();
+        let unique_error = conn
+            .execute("INSERT INTO t (value) VALUES ('dup')", [])
+            .unwrap_err();
+        let unique_error = anyhow::Error::new(unique_error);
+
+        assert!(is_unique_constraint_violation(&unique_error));
+        assert!(!is_unique_constraint_violation(&anyhow::anyhow!(
+            "not a sqlite error"
+        )));
+    }
+
     // Test 1: fresh db with 2 items from a known model
     #[test]
     fn persists_session_and_items_to_fresh_db() {

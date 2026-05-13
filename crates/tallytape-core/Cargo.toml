@@ -3,6 +3,9 @@ name = "tallytape-core"
 version = "0.1.0"
 edition = "2021"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+
 [dependencies]
 anyhow = "1.0.102"
 chrono = { version = "0.4", default-features = false, features = ["std"] }

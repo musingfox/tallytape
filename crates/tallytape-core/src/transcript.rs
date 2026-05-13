@@ -126,6 +126,7 @@ mod tests {
     /// build for a known cwd/sessionId pair must match an actual file.
     /// The test silently passes when the live data isn't present so it
     /// stays usable in CI/sandboxed environments.
+    #[cfg(not(coverage))]
     #[test]
     fn matches_live_filesystem_when_available() {
         use std::fs;
