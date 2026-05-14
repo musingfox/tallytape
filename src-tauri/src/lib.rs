@@ -8,7 +8,7 @@ use anyhow::Context;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tallytape_core::{db_path, Database, Item, ItemRepository, Receipt, ReceiptRepository};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
 const RECEIPT_ADDED_EVENT: &str = "receipt-added";
 const RECEIPT_UPDATED_EVENT: &str = "receipt-updated";
@@ -113,6 +113,32 @@ pub enum ReceiptChange {
     Updated(ReceiptDto),
 }
 
+// C1: EventEmitter trait — allows deterministic testing via a stub
+pub trait EventEmitter: Send + Sync + 'static {
+    fn emit_receipt_change(&self, change: &ReceiptChange) -> Result<(), String>;
+}
+
+impl EventEmitter for AppHandle {
+    fn emit_receipt_change(&self, change: &ReceiptChange) -> Result<(), String> {
+        match change {
+            ReceiptChange::Added(receipt) => {
+                tauri::Emitter::emit(self, RECEIPT_ADDED_EVENT, receipt.clone())
+                    .map_err(|e| e.to_string())
+            }
+            ReceiptChange::Updated(receipt) => {
+                tauri::Emitter::emit(self, RECEIPT_UPDATED_EVENT, receipt.clone())
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+}
+
+// C3: WatchSignal enum — crate-private
+enum WatchSignal {
+    DatabaseTouched,
+    Stop,
+}
+
 pub struct AppBackend {
     db: Database,
     receipt_snapshot: Mutex<HashMap<i64, i64>>,
@@ -194,9 +220,61 @@ impl AppBackend {
     }
 }
 
+// C4: WatcherHandle — shutdown + Drop + from_parts test ctor
+pub struct WatcherHandle {
+    watcher: Option<RecommendedWatcher>,
+    stop_tx: Option<mpsc::Sender<WatchSignal>>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl WatcherHandle {
+    pub fn shutdown(&mut self) {
+        // Send Stop signal; drop watcher; join thread.
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(WatchSignal::Stop);
+        }
+        // Drop the watcher so the notify thread stops sending events.
+        self.watcher.take();
+        // Join the scanner thread.
+        if let Some(handle) = self.join.take() {
+            match handle.join() {
+                Ok(()) => {}
+                Err(_) => eprintln!("receipt scanner thread panicked"),
+            }
+        }
+    }
+
+    pub(crate) fn from_parts(
+        watcher: Option<RecommendedWatcher>,
+        stop_tx: mpsc::Sender<WatchSignal>,
+        join: thread::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            watcher,
+            stop_tx: Some(stop_tx),
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for WatcherHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 pub struct AppState {
-    backend: Arc<AppBackend>,
-    _watcher: RecommendedWatcher,
+    pub backend: Arc<AppBackend>,
+    pub watcher: Mutex<Option<WatcherHandle>>,
+}
+
+impl AppState {
+    pub fn shutdown_watcher(&self) {
+        let taken = self.watcher.lock().ok().and_then(|mut g| g.take());
+        if let Some(mut h) = taken {
+            h.shutdown();
+        }
+    }
 }
 
 #[tauri::command]
@@ -224,20 +302,25 @@ fn app_error(error: anyhow::Error) -> AppError {
     error.into()
 }
 
-fn start_receipt_watcher(
-    app: AppHandle,
+fn start_receipt_watcher<E: EventEmitter>(
+    emitter: E,
     backend: Arc<AppBackend>,
     database_path: PathBuf,
-) -> anyhow::Result<RecommendedWatcher> {
+) -> anyhow::Result<WatcherHandle> {
     let watched_parent = database_path
         .parent()
         .context("database path has no parent directory")?
         .to_path_buf();
     let watched_paths = watched_database_paths(&database_path);
-    let (tx, rx) = mpsc::channel();
+
+    // Single channel: watcher callback sends DatabaseTouched; shutdown sends Stop.
+    let (tx, rx) = mpsc::channel::<WatchSignal>();
+    let tx_for_notify = tx.clone();
+    let tx_for_stop = tx;
+
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         if event_touches_watched_database(&result, &watched_paths) {
-            let _ = tx.send(());
+            let _ = tx_for_notify.send(WatchSignal::DatabaseTouched);
         }
     })
     .context("failed to create receipt database watcher")?;
@@ -246,9 +329,9 @@ fn start_receipt_watcher(
         .watch(&watched_parent, RecursiveMode::NonRecursive)
         .with_context(|| format!("failed to watch {}", watched_parent.display()))?;
 
-    thread::spawn(move || run_debounced_receipt_scanner(app, backend, rx));
+    let join = thread::spawn(move || run_debounced_receipt_scanner(emitter, backend, rx));
 
-    Ok(watcher)
+    Ok(WatcherHandle::from_parts(Some(watcher), tx_for_stop, join))
 }
 
 fn watched_database_paths(database_path: &Path) -> Vec<PathBuf> {
@@ -270,25 +353,52 @@ fn event_touches_watched_database(
         .unwrap_or(false)
 }
 
-fn run_debounced_receipt_scanner(app: AppHandle, backend: Arc<AppBackend>, rx: mpsc::Receiver<()>) {
-    while rx.recv().is_ok() {
-        while rx.recv_timeout(WATCH_DEBOUNCE).is_ok() {}
+// C2: run_debounced_receipt_scanner — generic over EventEmitter; breaks on WatchSignal::Stop
+fn run_debounced_receipt_scanner<E: EventEmitter>(
+    emitter: E,
+    backend: Arc<AppBackend>,
+    rx: mpsc::Receiver<WatchSignal>,
+) {
+    loop {
+        // Wait for first signal
+        let first = match rx.recv() {
+            Ok(signal) => signal,
+            Err(_) => return, // sender disconnected
+        };
 
-        match backend.scan_receipt_changes() {
-            Ok(changes) => emit_receipt_changes(&app, changes),
-            Err(error) => eprintln!("failed to scan receipt changes: {error}"),
-        }
-    }
-}
+        match first {
+            WatchSignal::Stop => return,
+            WatchSignal::DatabaseTouched => {
+                // Drain additional signals during debounce window
+                let mut stop_requested = false;
+                loop {
+                    match rx.recv_timeout(WATCH_DEBOUNCE) {
+                        Ok(WatchSignal::Stop) => {
+                            stop_requested = true;
+                            break;
+                        }
+                        Ok(WatchSignal::DatabaseTouched) => {
+                            // coalesce — keep draining
+                        }
+                        Err(_) => break, // timeout or disconnected
+                    }
+                }
 
-fn emit_receipt_changes(app: &AppHandle, changes: Vec<ReceiptChange>) {
-    for change in changes {
-        match change {
-            ReceiptChange::Added(receipt) => {
-                let _ = app.emit(RECEIPT_ADDED_EVENT, receipt);
-            }
-            ReceiptChange::Updated(receipt) => {
-                let _ = app.emit(RECEIPT_UPDATED_EVENT, receipt);
+                // Scan and emit
+                match backend.scan_receipt_changes() {
+                    Ok(changes) => {
+                        for change in &changes {
+                            if let Err(e) = emitter.emit_receipt_change(change) {
+                                eprintln!("failed to emit receipt change: {e}");
+                            }
+                        }
+                    }
+                    Err(error) => eprintln!("failed to scan receipt changes: {error}"),
+                }
+
+                if stop_requested {
+                    return;
+                }
             }
         }
     }
@@ -302,10 +412,11 @@ pub fn run() {
             let path = db_path().context("failed to resolve tallytape database path")?;
             let backend =
                 Arc::new(AppBackend::open(&path).context("failed to open tallytape database")?);
-            let watcher = start_receipt_watcher(app.handle().clone(), Arc::clone(&backend), path)?;
+            let watcher =
+                start_receipt_watcher(app.handle().clone(), Arc::clone(&backend), path)?;
             app.manage(AppState {
                 backend,
-                _watcher: watcher,
+                watcher: Mutex::new(Some(watcher)),
             });
             Ok(())
         })
@@ -314,8 +425,15 @@ pub fn run() {
             get_receipt,
             list_items_by_receipt
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.shutdown_watcher();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -390,6 +508,27 @@ mod tests {
         let mut event = notify::Event::new(notify::EventKind::Any);
         event.paths = paths;
         Ok(event)
+    }
+
+    // C1: StubEmitter for deterministic tests
+    #[derive(Clone, Default)]
+    struct StubEmitter {
+        events: Arc<Mutex<Vec<(String, ReceiptDto)>>>,
+    }
+
+    impl EventEmitter for StubEmitter {
+        fn emit_receipt_change(&self, change: &ReceiptChange) -> Result<(), String> {
+            let mut events = self.events.lock().unwrap();
+            match change {
+                ReceiptChange::Added(receipt) => {
+                    events.push(("receipt-added".to_string(), receipt.clone()));
+                }
+                ReceiptChange::Updated(receipt) => {
+                    events.push(("receipt-updated".to_string(), receipt.clone()));
+                }
+            }
+            Ok(())
+        }
     }
 
     #[test]
@@ -587,5 +726,301 @@ mod tests {
         writer.join().unwrap();
 
         assert_eq!(app_backend.list_receipts(None).unwrap().len(), 100);
+    }
+
+    // C1 tests: StubEmitter records correct event names and payloads
+    #[test]
+    fn stub_emitter_records_added_event() {
+        let stub = StubEmitter::default();
+        let (_dir, backend) = test_backend();
+        let id = insert_receipt(backend.database(), "/stub-added", 1_777_593_600);
+        let receipt = backend.get_receipt(id).unwrap().unwrap();
+
+        stub.emit_receipt_change(&ReceiptChange::Added(receipt.clone()))
+            .unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "receipt-added");
+        assert_eq!(recorded[0].1.id, id);
+    }
+
+    #[test]
+    fn stub_emitter_records_updated_event() {
+        let stub = StubEmitter::default();
+        let (_dir, backend) = test_backend();
+        let id = insert_receipt(backend.database(), "/stub-updated", 1_777_593_600);
+        let receipt = backend.get_receipt(id).unwrap().unwrap();
+
+        stub.emit_receipt_change(&ReceiptChange::Updated(receipt.clone()))
+            .unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "receipt-updated");
+        assert_eq!(recorded[0].1.id, id);
+    }
+
+    // C3 smoke: WatchSignal variants are constructible and pattern-matchable
+    #[test]
+    fn watch_signal_variants_are_constructible() {
+        let touched = WatchSignal::DatabaseTouched;
+        let stop = WatchSignal::Stop;
+        let touched_matches = matches!(touched, WatchSignal::DatabaseTouched);
+        let stop_matches = matches!(stop, WatchSignal::Stop);
+        assert!(touched_matches);
+        assert!(stop_matches);
+    }
+
+    // C5: Deterministic debounce-coalescing test
+    #[test]
+    fn scanner_coalesces_burst_into_single_added_event() {
+        let (_dir, backend) = test_backend();
+        let backend = Arc::new(backend);
+        let id = insert_receipt(backend.database(), "/burst", 1_777_593_600);
+
+        let stub = StubEmitter::default();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let stub_clone = stub.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        // Send 5 DatabaseTouched signals in quick succession
+        for _ in 0..5 {
+            tx.send(WatchSignal::DatabaseTouched).unwrap();
+        }
+        // Wait for debounce to settle
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        // Stop the scanner
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "receipt-added");
+        assert_eq!(recorded[0].1.id, id);
+    }
+
+    // C2 test: Stop alone records 0 events
+    #[test]
+    fn scanner_stop_alone_records_no_events() {
+        let (_dir, backend) = test_backend();
+        let backend = Arc::new(backend);
+
+        let stub = StubEmitter::default();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let stub_clone = stub.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert_eq!(recorded.len(), 0);
+    }
+
+    // C6: Two distinct bursts with intervening DB change
+    #[test]
+    fn scanner_two_bursts_emit_added_then_updated() {
+        let (_dir, backend) = test_backend();
+        let backend = Arc::new(backend);
+        let id = insert_receipt(backend.database(), "/two-bursts", 1_777_593_600);
+
+        let stub = StubEmitter::default();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let stub_clone = stub.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        // Burst 1: emit receipt-added
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+
+        // Verify first event
+        {
+            let recorded = stub.events.lock().unwrap();
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].0, "receipt-added");
+            assert_eq!(recorded[0].1.id, id);
+        }
+
+        // UPDATE updated_at on the receipt (mirroring lib.rs:548-555 pattern)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 10;
+        {
+            let conn = backend.database().lock();
+            conn.execute(
+                "UPDATE receipts SET updated_at = ?1 WHERE id = ?2",
+                [now, id],
+            )
+            .unwrap();
+        }
+
+        // Burst 2: emit receipt-updated
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+
+        // Stop and join
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].0, "receipt-added");
+        assert_eq!(recorded[0].1.id, id);
+        assert_eq!(recorded[1].0, "receipt-updated");
+        assert_eq!(recorded[1].1.id, id);
+    }
+
+    // C4 tests: WatcherHandle shutdown, drop, double-shutdown
+    #[test]
+    fn watcher_handle_shutdown_joins_thread() {
+        let stub = StubEmitter::default();
+        let (_dir, backend) = test_backend();
+        let backend = Arc::new(backend);
+
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let backend_clone = Arc::clone(&backend);
+        let stub_clone = stub.clone();
+        let join = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        let mut handle = WatcherHandle::from_parts(None, tx, join);
+
+        // Send a DatabaseTouched before shutdown (scanner should handle it)
+        // Then shutdown — scanner must be joined within this call
+        handle.shutdown();
+
+        // If we reach here, thread was joined (shutdown blocks until join).
+        // No panic = success.
+    }
+
+    #[test]
+    fn watcher_handle_drop_terminates_thread() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_clone = Arc::clone(&alive);
+
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+
+        // Spawn a thread that sets alive=false when it exits
+        let join = thread::spawn(move || {
+            // Run the scanner — it will exit when Stop is sent or rx disconnects
+            let _rx = rx; // hold rx so the channel stays open until thread exits
+            loop {
+                match _rx.recv() {
+                    Ok(WatchSignal::Stop) => break,
+                    Ok(WatchSignal::DatabaseTouched) => {}
+                    Err(_) => break,
+                }
+            }
+            alive_clone.store(false, Ordering::SeqCst);
+        });
+
+        let handle = WatcherHandle::from_parts(None, tx, join);
+
+        // Drop without calling shutdown explicitly
+        drop(handle);
+
+        // Poll for up to 500ms for thread to terminate
+        let start = std::time::Instant::now();
+        while alive.load(Ordering::SeqCst) {
+            if start.elapsed() > Duration::from_millis(500) {
+                panic!("thread did not terminate within 500ms after WatcherHandle drop");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!alive.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn watcher_handle_double_shutdown_is_noop() {
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+
+        let join = thread::spawn(move || {
+            // Exit as soon as channel closes or Stop received
+            let _ = rx.recv();
+        });
+
+        let mut handle = WatcherHandle::from_parts(None, tx, join);
+        handle.shutdown(); // first call — joins thread
+        handle.shutdown(); // second call — must not panic
+    }
+
+    // C8 unit test: AppState::shutdown_watcher joins scanner thread
+    #[test]
+    fn app_state_shutdown_watcher_joins_thread() {
+        let (_dir, backend) = test_backend();
+        let backend = Arc::new(backend);
+        let stub = StubEmitter::default();
+
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let stub_clone = stub.clone();
+        let backend_clone = Arc::clone(&backend);
+        let join = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        let watcher_handle = WatcherHandle::from_parts(None, tx, join);
+        let state = AppState {
+            backend,
+            watcher: Mutex::new(Some(watcher_handle)),
+        };
+
+        state.shutdown_watcher();
+
+        // Second call must be a no-op (watcher was taken)
+        state.shutdown_watcher();
+
+        // Verify the watcher slot is now empty
+        let guard = state.watcher.lock().unwrap();
+        assert!(guard.is_none());
+    }
+
+    // C7: Real-notify smoke test (ignored — non-deterministic on macOS FSEvents)
+    #[test]
+    #[ignore]
+    fn real_notify_smoke_test_detects_database_write() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&db_path).unwrap());
+        let stub = StubEmitter::default();
+
+        let mut handle =
+            start_receipt_watcher(stub.clone(), Arc::clone(&backend), db_path.clone()).unwrap();
+
+        // Use a second Database::open (mirroring concurrent_writer_style_writes_and_app_reads_do_not_lock)
+        let writer_db = Database::open(&db_path).unwrap();
+        insert_receipt(&writer_db, "/x", 1_777_593_600);
+
+        // Poll for up to 2 seconds
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            {
+                let recorded = stub.events.lock().unwrap();
+                if recorded.len() >= 1 {
+                    assert_eq!(recorded[0].0, "receipt-added");
+                    break;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("no receipt-added event received within 2 seconds");
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        handle.shutdown();
     }
 }
