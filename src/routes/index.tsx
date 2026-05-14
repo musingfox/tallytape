@@ -1,5 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useCounterStore } from "../store/counter";
+import { useReceiptEvents } from "../receipts/useReceiptEvents";
+import { useReceiptStore } from "../receipts/store";
 
 export const Route = createFileRoute("/")({
   component: Index,
@@ -8,6 +10,8 @@ export const Route = createFileRoute("/")({
 function Index() {
   const count = useCounterStore((state) => state.count);
   const increment = useCounterStore((state) => state.increment);
+  useReceiptEvents();
+  const receipts = useReceiptStore((s) => Array.from(s.receipts.values()));
 
   return (
     <div className="p-4">
@@ -16,6 +20,13 @@ function Index() {
       <button className="mt-2 px-4 py-2 bg-blue-500 text-white rounded" onClick={increment}>
         Increment
       </button>
+      <ul className="mt-4">
+        {receipts.map((receipt) => (
+          <li key={receipt.id}>
+            {receipt.cwd} — {receipt.date} — {receipt.updatedAt}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

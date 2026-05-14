@@ -989,6 +989,181 @@ mod tests {
         assert!(guard.is_none());
     }
 
+    // B2: No-op re-ingest emits zero events
+    #[test]
+    fn scanner_no_op_reingest_emits_zero_events() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        // Pre-insert a receipt using a writer DB, then close it
+        let writer_db = Database::open(&path).unwrap();
+        let t = 1_777_593_600i64;
+        let rid = insert_receipt(&writer_db, "/b2", t);
+        drop(writer_db);
+
+        // Open AppBackend — snapshot is pre-populated with the existing receipt
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        // Re-upsert with identical args via a new writer handle — DO NOTHING, no-op
+        let writer_db2 = Database::open(&path).unwrap();
+        let session_id = insert_session(&writer_db2, "/b2", t);
+        ReceiptRepository::new(writer_db2.clone())
+            .upsert_by_cwd_date(Some(session_id), "/b2", t)
+            .unwrap();
+        let _ = rid;
+
+        let stub = StubEmitter::default();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let stub_clone = stub.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert!(recorded.is_empty(), "no-op re-ingest must emit zero events");
+    }
+
+    // B3: N inserts in one burst → N receipt-added events
+    #[test]
+    fn scanner_three_inserts_emit_three_added() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        let t = 1_777_593_600i64;
+        let id1 = insert_receipt(&writer_db, "/a", t);
+        let id2 = insert_receipt(&writer_db, "/b", t);
+        let id3 = insert_receipt(&writer_db, "/c", t);
+
+        let stub = StubEmitter::default();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let stub_clone = stub.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert_eq!(recorded.len(), 3, "expected 3 receipt-added events");
+        assert!(
+            recorded.iter().all(|(name, _)| name == "receipt-added"),
+            "all events must be receipt-added"
+        );
+        let ids: std::collections::HashSet<i64> =
+            recorded.iter().map(|(_, r)| r.id).collect();
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+        assert!(ids.contains(&id3));
+    }
+
+    // B4: Insert + update in one debounce window → exactly one receipt-added
+    #[test]
+    fn scanner_insert_and_update_in_one_window_emits_one_added() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        let t = 1_777_593_600i64;
+        let id = insert_receipt(&writer_db, "/b4", t);
+
+        // Directly bump updated_at (trigger won't re-fire since we change updated_at)
+        {
+            let conn = writer_db.lock();
+            conn.execute(
+                "UPDATE receipts SET updated_at = updated_at + 1 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        }
+
+        let stub = StubEmitter::default();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let stub_clone = stub.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "expected exactly 1 event");
+        assert_eq!(recorded[0].0, "receipt-added");
+        assert_eq!(recorded[0].1.id, id);
+    }
+
+    // B5: Manual UPDATE after drain emits receipt-updated (regression guard)
+    #[test]
+    fn scanner_real_update_after_drain_emits_receipt_updated() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        let t = 1_777_593_600i64;
+        let id = insert_receipt(&writer_db, "/b5", t);
+
+        let stub = StubEmitter::default();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let stub_clone = stub.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+        });
+
+        // First drain: seats the snapshot with receipt-added
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+
+        {
+            let recorded = stub.events.lock().unwrap();
+            assert_eq!(recorded.len(), 1, "first drain must yield receipt-added");
+            assert_eq!(recorded[0].0, "receipt-added");
+        }
+
+        // Sleep so unixepoch() advances
+        thread::sleep(Duration::from_millis(1100));
+
+        // Real column change — trigger fires and bumps updated_at
+        {
+            let conn = writer_db.lock();
+            conn.execute(
+                "UPDATE receipts SET cwd = ?2 WHERE id = ?1",
+                (id, "/b5-updated"),
+            )
+            .unwrap();
+        }
+
+        // Second drain: should yield receipt-updated
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let recorded = stub.events.lock().unwrap();
+        assert_eq!(recorded.len(), 2, "expected 2 events total");
+        assert_eq!(recorded[0].0, "receipt-added");
+        assert_eq!(recorded[0].1.id, id);
+        assert_eq!(recorded[1].0, "receipt-updated");
+        assert_eq!(recorded[1].1.id, id);
+    }
+
     // C7: Real-notify smoke test (ignored — non-deterministic on macOS FSEvents)
     #[test]
     #[ignore]

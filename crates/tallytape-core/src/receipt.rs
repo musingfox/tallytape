@@ -64,7 +64,7 @@ impl ReceiptRepository {
         tx.execute(
             "INSERT INTO receipts (session_id, cwd, date) \
              VALUES (?1, ?2, date(?3, 'unixepoch', 'localtime')) \
-             ON CONFLICT(cwd, date) DO UPDATE SET cwd = excluded.cwd",
+             ON CONFLICT(cwd, date) DO NOTHING",
             rusqlite::params![seed_session_id, cwd, occurred_at],
         )
         .context("upsert_by_cwd_date: insert failed")?;
@@ -385,6 +385,34 @@ mod tests {
         // id DESC: sid2 was inserted last
         assert_eq!(receipts[0].cwd, "/b");
         assert_eq!(receipts[1].cwd, "/a");
+    }
+
+    #[test]
+    // B1: upsert_no_op_does_not_bump_updated_at
+    fn upsert_no_op_does_not_bump_updated_at() {
+        let db = open_db();
+        let repo = ReceiptRepository::new(db.clone());
+
+        // 2026-05-01T00:00:00 UTC = 1_777_593_600
+        let occurred_at = 1_777_593_600i64;
+        let sid = insert_session(&db, Some("/a"), occurred_at);
+
+        let r1 = repo
+            .upsert_by_cwd_date(Some(sid), "/a", occurred_at)
+            .expect("first upsert should succeed");
+
+        // Sleep > 1 s so unixepoch() would tick if the trigger fired
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let r2 = repo
+            .upsert_by_cwd_date(Some(sid), "/a", occurred_at)
+            .expect("second upsert should succeed");
+
+        assert_eq!(r1.id, r2.id, "same receipt must be returned");
+        assert_eq!(
+            r2.updated_at, r1.updated_at,
+            "updated_at must not change on no-op re-upsert"
+        );
     }
 
     #[test]

@@ -717,15 +717,17 @@ mod merge_scenarios {
 mod triggers {
     use super::*;
 
-    /// C12 — `trg_receipts_updated_at` fires when a second item is merged into
-    /// the same receipt, bumping `updated_at` past the value from the first merge.
+    /// Contract B1 — Re-merging an item into the same `(cwd, date)` receipt is
+    /// a no-op: `upsert_by_cwd_date` now uses `DO NOTHING`, so the
+    /// `trg_receipts_updated_at` trigger never fires and `updated_at` is
+    /// unchanged even after a >1 s sleep.
     #[test]
-    fn updated_at_trigger_fires_on_remerge() {
+    fn merge_item_no_op_does_not_bump_updated_at() {
         let db = open_db();
         let session = make_session(&db, "claude");
         let ts = 1_746_403_200i64;
 
-        // First merge
+        // First merge — creates the receipt
         let item1 = merge_item(&db, session.id, make_draft("req-c12a", ts, 10, 20, 0.01))
             .expect("first merge_item");
 
@@ -736,12 +738,12 @@ mod triggers {
             .expect("find_by_id should not error")
             .expect("receipt should exist");
 
-        // Sleep 1.1s to ensure unixepoch() advances before the second merge
+        // Sleep 1.1s so unixepoch() would tick if the trigger fired
         std::thread::sleep(Duration::from_millis(1100));
 
         // Second merge into the same (session, cwd, date) with a different request_id.
-        // upsert_by_cwd_date now uses DO UPDATE SET cwd = excluded.cwd, which fires the
-        // AFTER UPDATE trigger and bumps updated_at to CURRENT_TIMESTAMP.
+        // upsert_by_cwd_date now uses DO NOTHING, so no UPDATE is issued and
+        // trg_receipts_updated_at does not fire.
         merge_item(
             &db,
             session.id,
@@ -754,11 +756,9 @@ mod triggers {
             .expect("find_by_id should not error")
             .expect("receipt should still exist");
 
-        assert!(
-            r1.updated_at > r0.updated_at,
-            "updated_at ({}) should be greater than original ({}) after trigger fires on remerge",
-            r1.updated_at,
-            r0.updated_at
+        assert_eq!(
+            r1.updated_at, r0.updated_at,
+            "updated_at must not change on no-op re-merge (DO NOTHING)"
         );
     }
 }
