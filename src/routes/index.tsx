@@ -11,7 +11,8 @@ function Index() {
   const count = useCounterStore((state) => state.count);
   const increment = useCounterStore((state) => state.increment);
   useReceiptEvents();
-  const receipts = useReceiptStore((s) => Array.from(s.receipts.values()));
+  const receiptMap = useReceiptStore((s) => s.receipts);
+  const receipts = Array.from(receiptMap.values());
 
   return (
     <div className="p-4">

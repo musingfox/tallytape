@@ -12,7 +12,12 @@ const TanStackRouterDevtools = import.meta.env.PROD
 export const Route = createRootRoute({
   component: () => (
     <>
-      <Outlet />
+      <header role="banner">
+        <h1>TallyTape</h1>
+      </header>
+      <main>
+        <Outlet />
+      </main>
       <Suspense>
         <TanStackRouterDevtools />
       </Suspense>
