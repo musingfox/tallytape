@@ -728,6 +728,85 @@ mod tests {
         assert_eq!(app_backend.list_receipts(None).unwrap().len(), 100);
     }
 
+    /// Run: cargo test -p tallytape-app concurrent_writer_writes_100_during_reads_no_lock_errors -- --nocapture
+    ///
+    /// Verifies SQLite WAL handles 100 concurrent writers (each own connection) during
+    /// concurrent reads with zero lock errors.
+    #[test]
+    fn concurrent_writer_writes_100_during_reads_no_lock_errors() {
+        use std::collections::HashSet;
+        use std::sync::Barrier;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("stress.db");
+
+        // Open AppBackend FIRST so migrations complete sequentially before
+        // writer threads each call Database::open on the same file.
+        let app_backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        // C1: WAL is active.
+        let jm: String = app_backend
+            .database()
+            .lock()
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(jm, "wal");
+
+        // Pre-open 100 distinct Database handles (100 distinct OS connections).
+        let mut dbs: Vec<Database> = Vec::with_capacity(100);
+        for _ in 0..100 {
+            dbs.push(Database::open(&path).unwrap());
+        }
+
+        // Barrier(101): 100 writers + 1 reader all released simultaneously.
+        let barrier = Arc::new(Barrier::new(101));
+
+        // Reader thread: waits at barrier, then polls until 100 rows visible or fuse exhausted.
+        let reader_backend = Arc::clone(&app_backend);
+        let reader_barrier = Arc::clone(&barrier);
+        let reader = thread::spawn(move || {
+            reader_barrier.wait();
+            let mut final_len = 0usize;
+            for _ in 0..500 {
+                final_len = reader_backend.list_receipts(None).unwrap().len();
+                if final_len >= 100 { break; }
+            }
+            final_len
+        });
+
+        // 100 writer threads: each holds a pre-opened Database, released by barrier.
+        let mut writers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(100);
+        for (i, db) in dbs.into_iter().enumerate() {
+            let writer_barrier = Arc::clone(&barrier);
+            writers.push(thread::spawn(move || {
+                writer_barrier.wait();
+                ReceiptRepository::new(db)
+                    .upsert_by_cwd_date(None, &format!("/stress-cwd-{i}"), 1_777_593_600)
+                    .unwrap();
+            }));
+        }
+
+        for w in writers {
+            w.join().unwrap();
+        }
+        reader.join().unwrap();
+
+        // C2: final assertions.
+        assert_eq!(app_backend.list_receipts(None).unwrap().len(), 100);
+        let count: i64 = app_backend
+            .database()
+            .lock()
+            .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 100);
+        let cwds: HashSet<String> = app_backend
+            .list_receipts(None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.cwd)
+            .collect();
+        assert_eq!(cwds.len(), 100);
+    }
+
     // C1 tests: StubEmitter records correct event names and payloads
     #[test]
     fn stub_emitter_records_added_event() {
