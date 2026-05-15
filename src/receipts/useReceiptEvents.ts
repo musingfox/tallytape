@@ -13,7 +13,7 @@ export function useReceiptEvents(): void {
     invoke<Receipt[]>('list_receipts', { dateRange: null })
       .then((list) => {
         if (!cancelled) {
-          useReceiptStore.getState().hydrate(list);
+          useReceiptStore.getState().setReceipts(list);
         }
       })
       .catch((err: unknown) => {
@@ -23,13 +23,13 @@ export function useReceiptEvents(): void {
     // Subscribe to live events
     unlistenPromises.push(
       listen<Receipt>('receipt-added', (ev) => {
-        useReceiptStore.getState().applyAdded(ev.payload);
+        useReceiptStore.getState().addReceipt(ev.payload);
       }),
     );
 
     unlistenPromises.push(
       listen<Receipt>('receipt-updated', (ev) => {
-        useReceiptStore.getState().applyUpdated(ev.payload);
+        useReceiptStore.getState().updateReceipt(ev.payload);
       }),
     );
 

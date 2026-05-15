@@ -3,7 +3,11 @@ import type { Receipt } from '../types';
 import { useReceiptStore } from '../store';
 
 beforeEach(() => {
-  useReceiptStore.setState({ receipts: new Map() });
+  useReceiptStore.setState({
+    receipts: new Map(),
+    selectedId: null,
+    pendingArrivals: [],
+  });
 });
 
 describe('F1 — Receipt type matches ReceiptDto', () => {
@@ -17,7 +21,7 @@ describe('F1 — Receipt type matches ReceiptDto', () => {
       updatedAt: 1747267260,
     } satisfies Receipt;
 
-    useReceiptStore.getState().applyAdded(literal);
+    useReceiptStore.getState().addReceipt(literal);
     const stored = useReceiptStore.getState().receipts.get(literal.id);
 
     expect(stored).toEqual(literal);
@@ -33,7 +37,7 @@ describe('F1 — Receipt type matches ReceiptDto', () => {
       updatedAt: 1747267260,
     } satisfies Receipt;
 
-    useReceiptStore.getState().applyAdded(literal);
+    useReceiptStore.getState().addReceipt(literal);
     const stored = useReceiptStore.getState().receipts.get(literal.id);
 
     expect(stored).toEqual(literal);

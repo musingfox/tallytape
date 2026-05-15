@@ -33,7 +33,11 @@ const r2: Receipt = { id: 2, sessionId: null, cwd: '/b', date: '2026-05-14', cre
 const r3: Receipt = { id: 3, sessionId: null, cwd: '/c', date: '2026-05-14', createdAt: 300, updatedAt: 300 };
 
 beforeEach(() => {
-  useReceiptStore.setState({ receipts: new Map() });
+  useReceiptStore.setState({
+    receipts: new Map(),
+    selectedId: null,
+    pendingArrivals: [],
+  });
   vi.clearAllMocks();
 });
 
@@ -59,7 +63,7 @@ describe('F3 — useReceiptEvents', () => {
     expect(mockedListen).toHaveBeenCalledWith('receipt-added', expect.any(Function));
     expect(mockedListen).toHaveBeenCalledWith('receipt-updated', expect.any(Function));
 
-    // Wait for hydrate to complete
+    // Wait for setReceipts to complete
     await waitFor(() => {
       expect(useReceiptStore.getState().receipts.size).toBe(2);
     });
@@ -132,7 +136,7 @@ describe('F3 — useReceiptEvents', () => {
 });
 
 describe('F4 — Initial-load / event race tolerance', () => {
-  it('event before hydrate — event wins when invoke returns older data', async () => {
+  it('event before initial setReceipts — event wins when invoke returns older data', async () => {
     let resolveInvoke!: (value: Receipt[]) => void;
     const invokePromise = new Promise<Receipt[]>((resolve) => {
       resolveInvoke = resolve;
@@ -171,11 +175,11 @@ describe('F4 — Initial-load / event race tolerance', () => {
       resolveInvoke([{ ...r1, updatedAt: 100 }]);
     });
 
-    // Hydrate must NOT clobber the newer event data
+    // setReceipts must NOT clobber the newer event data
     expect(useReceiptStore.getState().receipts.get(r1.id)?.updatedAt).toBe(200);
   });
 
-  it('hydrate first with r1@200, then stale event r1@150 is ignored', async () => {
+  it('initial setReceipts first with r1@200, then stale event r1@150 is ignored', async () => {
     const handlers: Record<string, (ev: { payload: Receipt }) => void> = {};
     const unlistenSpy = vi.fn();
 
@@ -196,17 +200,12 @@ describe('F4 — Initial-load / event race tolerance', () => {
       expect(useReceiptStore.getState().receipts.get(r1.id)?.updatedAt).toBe(200);
     });
 
-    // Fire a stale receipt-added (updatedAt=150) — applyAdded always sets by id,
-    // but updatedAt=150 < 200, so this would overwrite. The contract says applyAdded
-    // always overwrites. However F2 says applyUpdated ignores stale.
-    // F4 second case uses a stale handler, but via applyAdded the store gets updated.
-    // Per the brief: "F4 stale event after hydrate — already covered by F2's monotonic rule"
-    // which refers to applyUpdated. Testing applyUpdated stale:
+    // Fire a stale receipt-updated (updatedAt=150); updateReceipt must ignore it.
     await act(async () => {
       handlers['receipt-updated']?.({ payload: { ...r1, updatedAt: 150, cwd: '/stale' } });
     });
 
-    // stale applyUpdated is ignored
+    // stale updateReceipt is ignored
     expect(useReceiptStore.getState().receipts.get(r1.id)?.updatedAt).toBe(200);
     expect(useReceiptStore.getState().receipts.get(r1.id)?.cwd).not.toBe('/stale');
   });
