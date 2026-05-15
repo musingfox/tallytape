@@ -38,4 +38,22 @@ export default tseslint.config(
       "react-refresh/only-export-components": "off",
     },
   },
+  {
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: ["src/ipc/**", "src/**/__tests__/**", "src/**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@tauri-apps/api/core",
+              importNames: ["invoke"],
+              message: "Import wrappers from src/ipc instead of calling invoke directly.",
+            },
+          ],
+        },
+      ],
+    },
+  },
 );

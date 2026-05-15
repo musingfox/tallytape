@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listReceipts } from '../ipc';
 import { useReceiptStore } from './store';
 import type { Receipt } from './types';
 
@@ -10,7 +10,7 @@ export function useReceiptEvents(): void {
     const unlistenPromises: Promise<UnlistenFn>[] = [];
 
     // Hydrate baseline from backend
-    invoke<Receipt[]>('list_receipts', { dateRange: null })
+    listReceipts(null)
       .then((list) => {
         if (!cancelled) {
           useReceiptStore.getState().setReceipts(list);
