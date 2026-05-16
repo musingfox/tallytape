@@ -39,3 +39,10 @@ export interface ItemDto {
   cost: number;
   metadata: string | null;
 }
+
+/** Rust source: src-tauri/src/lib.rs:106 */
+export interface ReceiptSummaryDto {
+  receiptId: number;
+  totalCost: number;
+  itemCount: number;
+}

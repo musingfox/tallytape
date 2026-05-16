@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { getReceipt, listItemsByReceipt, listReceipts } from '../commands';
-import type { ItemDto, ReceiptDto } from '../types';
+import { getReceipt, listItemsByReceipt, listReceiptSummaries, listReceipts } from '../commands';
+import type { ItemDto, ReceiptDto, ReceiptSummaryDto } from '../types';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -51,6 +51,12 @@ const item2: ItemDto = {
   cacheReadTokens: 5,
   cacheCreationTokens: 3,
   metadata: '{"ok":true}',
+};
+
+const summary1: ReceiptSummaryDto = {
+  receiptId: 7,
+  totalCost: 0.35,
+  itemCount: 2,
 };
 
 beforeEach(() => {
@@ -119,6 +125,15 @@ describe('IPC command wrappers', () => {
       mockedInvoke.mockRejectedValue(error);
 
       await expect(listItemsByReceipt(7)).rejects.toBe(error);
+    });
+  });
+
+  describe('listReceiptSummaries', () => {
+    it('calls list_receipt_summaries without args and returns summaries', async () => {
+      mockedInvoke.mockResolvedValue([summary1]);
+
+      await expect(listReceiptSummaries()).resolves.toEqual([summary1]);
+      expect(mockedInvoke).toHaveBeenCalledWith('list_receipt_summaries');
     });
   });
 });

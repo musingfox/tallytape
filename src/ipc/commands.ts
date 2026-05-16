@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppError, DateRange, ItemDto, ReceiptDto } from './types';
+import type { AppError, DateRange, ItemDto, ReceiptDto, ReceiptSummaryDto } from './types';
 
 /**
  * Rust command source: src-tauri/src/lib.rs:281.
@@ -23,6 +23,14 @@ export async function getReceipt(id: number): Promise<ReceiptDto | null> {
  */
 export async function listItemsByReceipt(receiptId: number): Promise<ItemDto[]> {
   return invoke<ItemDto[]>('list_items_by_receipt', { receiptId });
+}
+
+/**
+ * Rust command source: src-tauri/src/lib.rs:312.
+ * Rejected promises carry an AppError-shaped payload ({ message: string }).
+ */
+export async function listReceiptSummaries(): Promise<ReceiptSummaryDto[]> {
+  return invoke<ReceiptSummaryDto[]>('list_receipt_summaries');
 }
 
 export type { AppError };

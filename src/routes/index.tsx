@@ -1,15 +1,10 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { listItemsByReceipt } from "../ipc";
+import { listReceiptSummaries, type ReceiptSummaryDto } from "../ipc";
 import { formatCost } from "./receipts/aggregate";
 import { useReceiptEvents } from "../receipts/useReceiptEvents";
 import { useReceiptList, useReceiptLoadStatus } from "../receipts/store";
 import { useCounterStore } from "../store/counter";
-
-interface ReceiptSummary {
-  totalCost: number;
-  itemCount: number;
-}
 
 export const Route = createFileRoute("/")({
   component: Index,
@@ -31,7 +26,7 @@ export function ReceiptTable() {
   const receipts = useReceiptList();
   const { status } = useReceiptLoadStatus();
   const navigate = useNavigate();
-  const [summaries, setSummaries] = useState<Map<number, ReceiptSummary>>(new Map());
+  const [summaries, setSummaries] = useState<Map<number, ReceiptSummaryDto>>(new Map());
   const [focusedIndex, setFocusedIndex] = useState(0);
   const tbodyRef = useRef<HTMLTableSectionElement>(null);
   const idKey = receipts.map((receipt) => receipt.id).join(",");
@@ -39,34 +34,24 @@ export function ReceiptTable() {
   useEffect(() => {
     let cancelled = false;
 
-    void Promise.all(
-      receipts.map(async (receipt) => {
-        try {
-          const items = await listItemsByReceipt(receipt.id);
-          return [
-            receipt.id,
-            {
-              totalCost: items.reduce((sum, item) => sum + item.cost, 0),
-              itemCount: items.length,
-            },
-          ] as const;
-        } catch {
-          return null;
+    void listReceiptSummaries()
+      .then((result) => {
+        if (cancelled) {
+          return;
         }
-      }),
-    ).then((entries) => {
-      if (cancelled) {
-        return;
-      }
 
-      const next = new Map<number, ReceiptSummary>();
-      for (const entry of entries) {
-        if (entry !== null) {
-          next.set(entry[0], entry[1]);
+        const next = new Map<number, ReceiptSummaryDto>();
+        for (const summary of result) {
+          next.set(summary.receiptId, summary);
         }
-      }
-      setSummaries(next);
-    });
+        setSummaries(next);
+      })
+      .catch(() => {
+        if (cancelled) {
+          return;
+        }
+        setSummaries(new Map());
+      });
 
     return () => {
       cancelled = true;
