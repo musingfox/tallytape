@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { listItemsByReceipt } from "../../ipc";
 import type { ItemDto } from "../../ipc/types";
-import { useReceiptById } from "../../receipts/store";
+import { useReceiptById, useReceiptLoadStatus, useReceiptStore } from "../../receipts/store";
 import { aggregateItemsByModel, formatCost, formatTokens } from "./aggregate";
 
 export function parseParams(raw: { id: string }): { id: number } {
@@ -21,8 +21,52 @@ function sessionSlug(cwd: string): string {
   return cwd.split("/").filter(Boolean).pop() ?? "—";
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function ReceiptPaperSkeleton() {
+  return (
+    <div
+      data-testid="receipt-paper-skeleton"
+      className="mx-auto my-8 w-[400px] border border-dashed border-[#333] bg-[#f8f8f8] p-[30px_20px] font-mono text-[#333]"
+    >
+      <div className="space-y-3 animate-pulse">
+        <div className="mx-auto h-8 w-24 rounded bg-[#ddd]" />
+        <div className="h-4 rounded bg-[#ddd]" />
+        <div className="h-4 w-3/4 rounded bg-[#ddd]" />
+        <div className="border-t border-dashed border-[#333] pt-3">
+          <div className="h-20 rounded bg-[#ddd]" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NotFoundPaper({ id }: { id: number }) {
+  return (
+    <div data-testid="receipt-paper" className="mx-auto my-8 w-[400px] bg-[#f8f8f8] p-[30px_20px] font-mono text-[#333]">
+      <h2 className="text-center font-bold">NO RECORD FOUND</h2>
+      <p className="mt-2 text-center">Receipt #{id} is not in the register.</p>
+    </div>
+  );
+}
+
+function ItemsLoading() {
+  return <div className="border border-dashed border-[#333] p-3 font-mono animate-pulse">PRINTING RECEIPT…</div>;
+}
+
+function ItemsError() {
+  return <div className="border border-dashed border-red-400 p-3 font-mono text-red-900">PAPER JAM — items failed to load</div>;
+}
+
+function ItemsEmpty() {
+  return <p className="font-mono">(no items recorded)</p>;
+}
+
 export function ReceiptDetail({ id }: { id: number }) {
   const receipt = useReceiptById(id);
+  const { status } = useReceiptLoadStatus();
   const [itemsState, setItemsState] = useState<ItemsState>(() => ({ receiptId: id, kind: "loading" }));
 
   useEffect(() => {
@@ -34,8 +78,9 @@ export function ReceiptDetail({ id }: { id: number }) {
           setItemsState({ receiptId: id, kind: "ready", value: items });
         }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (!cancelled) {
+          useReceiptStore.getState().pushError(errorMessage(err));
           setItemsState({ receiptId: id, kind: "error" });
         }
       });
@@ -55,7 +100,10 @@ export function ReceiptDetail({ id }: { id: number }) {
   );
 
   if (receipt === undefined) {
-    return <p>Not Found: receipt {id}</p>;
+    if (status === "idle" || status === "loading") {
+      return <ReceiptPaperSkeleton />;
+    }
+    return <NotFoundPaper id={id} />;
   }
 
   return (
@@ -84,8 +132,9 @@ export function ReceiptDetail({ id }: { id: number }) {
       <hr className="my-3 border-0 border-t-2 border-[#333]" />
 
       <div>
-        {currentKind === "loading" && <p>Loading items…</p>}
-        {currentKind === "error" && <p>Failed to load items</p>}
+        {currentKind === "loading" && <ItemsLoading />}
+        {currentKind === "error" && <ItemsError />}
+        {itemsState.receiptId === id && itemsState.kind === "ready" && itemsState.value.length === 0 && <ItemsEmpty />}
         {aggregated?.groups.map((group) => (
           <section key={group.model} className="mb-4">
             <div className="mb-2 flex justify-between border-b border-dashed border-[#ccc] pb-1 font-bold">

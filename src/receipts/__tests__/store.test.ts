@@ -41,6 +41,9 @@ beforeEach(() => {
     receipts: new Map(),
     selectedId: null,
     pendingArrivals: [],
+    loadStatus: 'idle',
+    loadError: null,
+    errors: [],
   });
 });
 
@@ -130,6 +133,36 @@ describe('receipt store actions', () => {
   it('clearPendingArrivals is a no-op for an empty queue', () => {
     expect(() => useReceiptStore.getState().clearPendingArrivals()).not.toThrow();
     expect(useReceiptStore.getState().pendingArrivals).toEqual([]);
+  });
+
+  it('setLoadStatus records status and error text', () => {
+    useReceiptStore.getState().setLoadStatus('error', 'db locked');
+
+    expect(useReceiptStore.getState().loadStatus).toBe('error');
+    expect(useReceiptStore.getState().loadError).toBe('db locked');
+  });
+
+  it('pushError returns an id and appends a toast error', () => {
+    const id = useReceiptStore.getState().pushError('boom');
+
+    expect(id).toEqual(expect.any(String));
+    expect(useReceiptStore.getState().errors).toEqual([expect.objectContaining({ id, message: 'boom' })]);
+  });
+
+  it('dismissError removes only the matching error', () => {
+    const first = useReceiptStore.getState().pushError('first');
+    const second = useReceiptStore.getState().pushError('second');
+
+    useReceiptStore.getState().dismissError(first);
+
+    expect(useReceiptStore.getState().errors.map((error) => error.id)).toEqual([second]);
+  });
+
+  it('dismissError is a no-op for an unknown id', () => {
+    useReceiptStore.getState().pushError('boom');
+
+    expect(() => useReceiptStore.getState().dismissError('missing')).not.toThrow();
+    expect(useReceiptStore.getState().errors).toHaveLength(1);
   });
 
   it('setReceipts → addReceipt → updateReceipt flow preserves monotonic updatedAt deduplication', () => {

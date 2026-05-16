@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ItemDto } from "../../ipc/types";
 import { useReceiptStore } from "../../receipts/store";
@@ -48,11 +48,19 @@ function seedReceipt(overrides: Partial<Receipt> = {}) {
         },
       ],
     ]),
+    loadStatus: "ready",
   });
 }
 
 beforeEach(() => {
-  useReceiptStore.setState({ receipts: new Map() });
+  useReceiptStore.setState({
+    receipts: new Map(),
+    selectedId: null,
+    pendingArrivals: [],
+    loadStatus: "ready",
+    loadError: null,
+    errors: [],
+  });
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockResolvedValue([]);
 });
@@ -73,6 +81,7 @@ describe("ReceiptDetail", () => {
           },
         ],
       ]),
+      loadStatus: "ready",
     });
 
     render(<ReceiptDetail id={42} />);
@@ -84,8 +93,28 @@ describe("ReceiptDetail", () => {
   it("renders a not found fallback for a missing receipt", () => {
     render(<ReceiptDetail id={999} />);
 
-    expect(screen.getByText(/Not Found/i)).toBeInTheDocument();
+    expect(screen.getByText(/NO RECORD FOUND/i)).toBeInTheDocument();
     expect(document.body.textContent).toContain("999");
+  });
+
+  it("renders a paper skeleton instead of not found before hydration completes", () => {
+    useReceiptStore.setState({ loadStatus: "loading", receipts: new Map() });
+
+    render(<ReceiptDetail id={42} />);
+
+    expect(screen.queryByText(/Not Found/i)).toBeNull();
+    expect(screen.getByTestId("receipt-paper-skeleton")).toBeInTheDocument();
+  });
+
+  it("switches from cold-link skeleton to post-hydration not found", async () => {
+    useReceiptStore.setState({ loadStatus: "loading", receipts: new Map() });
+
+    render(<ReceiptDetail id={42} />);
+    act(() => {
+      useReceiptStore.setState({ loadStatus: "ready" });
+    });
+
+    expect(await screen.findByText(/NO RECORD FOUND/)).toBeInTheDocument();
   });
 
   describe("receipt header", () => {
@@ -111,7 +140,8 @@ describe("ReceiptDetail", () => {
 
       render(<ReceiptDetail id={42} />);
 
-      expect(screen.getByText("Loading items…")).toBeInTheDocument();
+      expect(screen.getByText("PRINTING RECEIPT…")).toBeInTheDocument();
+      expect(screen.getByText("PRINTING RECEIPT…").className).toContain("animate-pulse");
     });
 
     it("does not update state after unmount when the item fetch resolves", async () => {
@@ -201,7 +231,7 @@ describe("ReceiptDetail", () => {
 
       render(<ReceiptDetail id={42} />);
 
-      await waitFor(() => expect(screen.queryByText("Loading items…")).toBeNull());
+      await screen.findByText("(no items recorded)");
       expect(screen.getByText("TOTAL")).toBeInTheDocument();
       expect(screen.getByText("$0.00")).toBeInTheDocument();
     });
@@ -226,7 +256,7 @@ describe("ReceiptDetail", () => {
 
       render(<ReceiptDetail id={42} />);
 
-      await waitFor(() => expect(screen.queryByText("Loading items…")).toBeNull());
+      await screen.findByText("(no items recorded)");
       expect(screen.queryByText(/CASHIER:/)).toBeNull();
       expect(screen.getByText("Thank you for building!")).toBeInTheDocument();
     });
@@ -245,14 +275,29 @@ describe("ReceiptDetail", () => {
       expect(paper.querySelector('[class*="border-dashed"]')).not.toBeNull();
     });
 
+    it("handles rejected item loading without an unhandledrejection event", async () => {
+      const spy = vi.fn();
+      window.addEventListener("unhandledrejection", spy);
+      seedReceipt();
+      vi.mocked(invoke).mockRejectedValue(new Error("boom"));
+
+      render(<ReceiptDetail id={42} />);
+
+      expect(await screen.findByText("PAPER JAM — items failed to load")).toBeInTheDocument();
+      await act(async () => {});
+      expect(spy).not.toHaveBeenCalled();
+      window.removeEventListener("unhandledrejection", spy);
+    });
+
     it("keeps the header visible when item loading fails", async () => {
       seedReceipt();
       vi.mocked(invoke).mockRejectedValue(new Error("boom"));
 
       render(<ReceiptDetail id={42} />);
 
-      expect(await screen.findByText("Failed to load items")).toBeInTheDocument();
+      expect(await screen.findByText("PAPER JAM — items failed to load")).toBeInTheDocument();
       expect(screen.getByText("/tmp/detail-found")).toBeInTheDocument();
+      expect(useReceiptStore.getState().errors.some((error) => error.message.includes("boom"))).toBe(true);
     });
 
     it("renders many items across all model groups with the correct total", async () => {

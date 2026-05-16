@@ -1,5 +1,6 @@
 import { createRootRoute, Outlet } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
+import { Toaster } from "../components/Toaster";
 
 const TanStackRouterDevtools = import.meta.env.PROD
   ? () => null
@@ -18,6 +19,7 @@ export const Route = createRootRoute({
       <main>
         <Outlet />
       </main>
+      <Toaster />
       <Suspense>
         <TanStackRouterDevtools />
       </Suspense>

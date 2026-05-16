@@ -32,6 +32,9 @@ function seedReceipts(receipts: Receipt[]) {
     receipts: new Map(receipts.map((item) => [item.id, item])),
     pendingArrivals: [],
     selectedId: null,
+    loadStatus: 'ready',
+    loadError: null,
+    errors: [],
   });
 }
 
@@ -74,8 +77,49 @@ describe("ReceiptTable", () => {
   it("renders an empty state and no table when there are no receipts", async () => {
     renderIndex();
 
-    expect(await screen.findByText("No receipts captured yet.")).toBeInTheDocument();
+    expect(await screen.findByText("No receipts yet — start a session to print your first tape.")).toBeInTheDocument();
     expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("renders five skeleton rows while receipts are loading", async () => {
+    useReceiptStore.setState({ loadStatus: "loading", receipts: new Map() });
+
+    renderIndex();
+
+    await waitFor(() => expect(screen.getAllByTestId("skeleton-row")).toHaveLength(5));
+    expect(screen.queryByText(/No receipts yet/)).toBeNull();
+    expect(screen.getByRole("table").querySelector("thead")).not.toBeNull();
+  });
+
+  it("renders five skeleton rows while receipts are idle", async () => {
+    useReceiptStore.setState({ loadStatus: "idle" });
+
+    renderIndex();
+
+    await waitFor(() => expect(screen.getAllByTestId("skeleton-row")).toHaveLength(5));
+    expect(screen.queryByText(/No receipts yet/)).toBeNull();
+  });
+
+  it("renders ready empty copy without skeleton rows", async () => {
+    useReceiptStore.setState({ loadStatus: "ready", receipts: new Map() });
+
+    renderIndex();
+
+    expect(await screen.findByText("No receipts yet — start a session to print your first tape.")).toBeInTheDocument();
+    expect(screen.queryAllByTestId("skeleton-row")).toHaveLength(0);
+  });
+
+  it("renders load error banner and toast", async () => {
+    useReceiptStore.setState({
+      loadStatus: "error",
+      loadError: "db locked",
+      errors: [{ id: "t1", message: "db locked", createdAt: 1 }],
+    });
+
+    renderIndex();
+
+    expect(await screen.findByText("Couldn't load receipts.")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("db locked");
   });
 
   it("navigates to the receipt detail route when a receipt row is clicked", async () => {

@@ -37,6 +37,9 @@ beforeEach(() => {
     receipts: new Map(),
     selectedId: null,
     pendingArrivals: [],
+    loadStatus: 'idle',
+    loadError: null,
+    errors: [],
   });
   vi.clearAllMocks();
 });
@@ -106,8 +109,12 @@ describe('F3 — useReceiptEvents', () => {
 
     await act(async () => {});
 
-    // Store stays empty
+    await waitFor(() => expect(useReceiptStore.getState().loadStatus).toBe('error'));
+
+    // Store stays empty and records the load failure
     expect(useReceiptStore.getState().receipts.size).toBe(0);
+    expect(useReceiptStore.getState().loadError).toBe('network error');
+    expect(useReceiptStore.getState().errors.some((error) => error.message.includes('network error'))).toBe(true);
 
     // listen was still called (subscriptions registered)
     expect(mockedListen).toHaveBeenCalled();
@@ -115,6 +122,36 @@ describe('F3 — useReceiptEvents', () => {
     expect(mockedListen).toHaveBeenCalledWith('receipt-updated', expect.any(Function));
 
     unmount();
+  });
+
+  it('handles rejected list_receipts without an unhandledrejection event', async () => {
+    const spy = vi.fn();
+    window.addEventListener('unhandledrejection', spy);
+    const unlistenSpy = vi.fn();
+    mockedListen.mockResolvedValue(unlistenSpy);
+    mockedInvoke.mockRejectedValue(new Error('boom'));
+
+    render(<Harness />);
+
+    await waitFor(() => expect(useReceiptStore.getState().errors.some((error) => error.message.includes('boom'))).toBe(true));
+    await act(async () => {});
+    expect(spy).not.toHaveBeenCalled();
+    window.removeEventListener('unhandledrejection', spy);
+  });
+
+  it('listen rejection records a toast error without throwing', async () => {
+    mockedListen.mockRejectedValue(new Error('listen failed'));
+    mockedInvoke.mockResolvedValue([]);
+
+    render(
+      <StrictMode>
+        <Harness />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(useReceiptStore.getState().errors.some((error) => error.message.includes('listen failed'))).toBe(true);
+    });
   });
 
   it('unmount still calls resolved unlisten when one listen rejects', async () => {
