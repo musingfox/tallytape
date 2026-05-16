@@ -160,18 +160,19 @@ describe("ReceiptTable", () => {
     expect(rows[2].textContent).toContain("id-1-cwd");
   });
 
-  it("fetches item summaries once per receipt and renders totals and item counts", async () => {
+  it("fetches summaries via a single aggregated IPC and renders totals and item counts", async () => {
     seedReceipts([
       receipt({ id: 1, cwd: "summary-1", date: "2026-05-15" }),
       receipt({ id: 2, cwd: "summary-2", date: "2026-05-14" }),
       receipt({ id: 3, cwd: "summary-3", date: "2026-05-13" }),
     ]);
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
-      if (cmd === "list_items_by_receipt") {
-        const id = (args as { receiptId: number }).receiptId;
-        if (id === 1) return [{ cost: 0.1 }, { cost: 0.25 }];
-        if (id === 2) return [{ cost: 1 }];
-        return [];
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === "list_receipt_summaries") {
+        return [
+          { receiptId: 1, totalCost: 0.35, itemCount: 2 },
+          { receiptId: 2, totalCost: 1, itemCount: 1 },
+          { receiptId: 3, totalCost: 0, itemCount: 0 },
+        ];
       }
       return [];
     });
@@ -179,7 +180,8 @@ describe("ReceiptTable", () => {
     renderIndex();
 
     await waitFor(() => expect(screen.getByText("0.35")).toBeInTheDocument());
-    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "list_items_by_receipt")).toHaveLength(3);
+    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "list_receipt_summaries")).toHaveLength(1);
+    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "list_items_by_receipt")).toHaveLength(0);
 
     const row1Cells = within(screen.getByText("summary-1").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
     expect(row1Cells[2]).toHaveTextContent("0.35");
@@ -194,16 +196,62 @@ describe("ReceiptTable", () => {
     expect(row3Cells[3]).toHaveTextContent("0");
   });
 
-  it("keeps a rejected receipt summary as dashes while other rows resolve", async () => {
+  it("drops stale summary resolutions when receipt dependencies change", async () => {
+    seedReceipts([
+      receipt({ id: 1, cwd: "stale-a", date: "2026-05-15" }),
+      receipt({ id: 2, cwd: "stale-b", date: "2026-05-14" }),
+    ]);
+    let resolveFirst: (value: unknown) => void = () => {};
+    let resolveSecond: (value: unknown) => void = () => {};
+    vi.mocked(invoke)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+
+    renderIndex();
+    await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledTimes(1));
+
+    seedReceipts([
+      receipt({ id: 1, cwd: "stale-a", date: "2026-05-15" }),
+      receipt({ id: 2, cwd: "stale-b", date: "2026-05-14" }),
+      receipt({ id: 3, cwd: "stale-c", date: "2026-05-13" }),
+    ]);
+    await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledTimes(2));
+
+    resolveSecond([{ receiptId: 3, totalCost: 9, itemCount: 9 }]);
+    await waitFor(() => expect(screen.getByLabelText("Total cost $9.00")).toBeInTheDocument());
+    resolveFirst([
+      { receiptId: 1, totalCost: 1, itemCount: 1 },
+      { receiptId: 2, totalCost: 2, itemCount: 2 },
+    ]);
+
+    await waitFor(() => {
+      const row = screen.getByText("stale-c").closest("tr") as HTMLTableRowElement;
+      const cells = within(row).getAllByRole("cell");
+      expect(cells[2]).toHaveTextContent("9");
+      expect(cells[3]).toHaveTextContent("9");
+    });
+    expect(screen.queryByText("1")).toBeNull();
+    expect(screen.queryByText("2")).toBeNull();
+  });
+
+  it("keeps a missing receipt summary as dashes while other rows resolve", async () => {
     seedReceipts([
       receipt({ id: 1, cwd: "summary-ok", date: "2026-05-15" }),
       receipt({ id: 2, cwd: "summary-fail", date: "2026-05-14" }),
     ]);
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
-      if (cmd === "list_items_by_receipt") {
-        const id = (args as { receiptId: number }).receiptId;
-        if (id === 2) throw new Error("failed");
-        return [{ cost: 4 }];
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === "list_receipt_summaries") {
+        return [{ receiptId: 1, totalCost: 4, itemCount: 1 }];
       }
       return [];
     });
@@ -328,11 +376,12 @@ describe("ReceiptTable", () => {
       receipt({ id: 1, cwd: "/two", date: "2026-05-15" }),
       receipt({ id: 2, cwd: "/one", date: "2026-05-14" }),
     ]);
-    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
-      if (cmd === "list_items_by_receipt") {
-        const id = (args as { receiptId: number }).receiptId;
-        if (id === 1) return [{ cost: 0.1 }, { cost: 0.25 }];
-        if (id === 2) return [{ cost: 1 }];
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === "list_receipt_summaries") {
+        return [
+          { receiptId: 1, totalCost: 0.35, itemCount: 2 },
+          { receiptId: 2, totalCost: 1, itemCount: 1 },
+        ];
       }
       return [];
     });

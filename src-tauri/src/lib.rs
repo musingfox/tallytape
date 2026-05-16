@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::Context;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use tallytape_core::{db_path, Database, Item, ItemRepository, Receipt, ReceiptRepository};
+use tallytape_core::{
+    db_path, Database, Item, ItemRepository, Receipt, ReceiptRepository, ReceiptSummary,
+};
 use tauri::{AppHandle, Manager, State};
 
 const RECEIPT_ADDED_EVENT: &str = "receipt-added";
@@ -107,6 +109,24 @@ impl From<Item> for ItemDto {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptSummaryDto {
+    pub receipt_id: i64,
+    pub total_cost: f64,
+    pub item_count: i64,
+}
+
+impl From<ReceiptSummary> for ReceiptSummaryDto {
+    fn from(summary: ReceiptSummary) -> Self {
+        Self {
+            receipt_id: summary.receipt_id,
+            total_cost: summary.total_cost,
+            item_count: summary.item_count,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReceiptChange {
     Added(ReceiptDto),
@@ -178,6 +198,12 @@ impl AppBackend {
         ItemRepository::new(self.db.clone())
             .list_by_receipt(receipt_id)
             .map(|items| items.into_iter().map(ItemDto::from).collect())
+    }
+
+    pub fn list_receipt_summaries(&self) -> anyhow::Result<Vec<ReceiptSummaryDto>> {
+        ReceiptRepository::new(self.db.clone())
+            .list_summaries()
+            .map(|summaries| summaries.into_iter().map(ReceiptSummaryDto::from).collect())
     }
 
     pub fn refresh_receipt_snapshot(&self) -> anyhow::Result<()> {
@@ -298,6 +324,11 @@ fn list_items_by_receipt(state: State<'_, AppState>, receipt_id: i64) -> AppResu
         .map_err(app_error)
 }
 
+#[tauri::command]
+fn list_receipt_summaries(state: State<'_, AppState>) -> AppResult<Vec<ReceiptSummaryDto>> {
+    state.backend.list_receipt_summaries().map_err(app_error)
+}
+
 fn app_error(error: anyhow::Error) -> AppError {
     error.into()
 }
@@ -412,8 +443,7 @@ pub fn run() {
             let path = db_path().context("failed to resolve tallytape database path")?;
             let backend =
                 Arc::new(AppBackend::open(&path).context("failed to open tallytape database")?);
-            let watcher =
-                start_receipt_watcher(app.handle().clone(), Arc::clone(&backend), path)?;
+            let watcher = start_receipt_watcher(app.handle().clone(), Arc::clone(&backend), path)?;
             app.manage(AppState {
                 backend,
                 watcher: Mutex::new(Some(watcher)),
@@ -423,7 +453,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_receipts,
             get_receipt,
-            list_items_by_receipt
+            list_items_by_receipt,
+            list_receipt_summaries
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -482,6 +513,17 @@ mod tests {
         request_id: &str,
         occurred_at: i64,
     ) {
+        insert_item_with_cost(db, receipt_id, session_id, request_id, occurred_at, 0.01);
+    }
+
+    fn insert_item_with_cost(
+        db: &Database,
+        receipt_id: i64,
+        session_id: i64,
+        request_id: &str,
+        occurred_at: i64,
+        cost: f64,
+    ) {
         tallytape_core::ItemRepository::new(db.clone())
             .insert(&NewItem {
                 receipt_id,
@@ -498,7 +540,7 @@ mod tests {
                 output_tokens: 2,
                 cache_read_tokens: None,
                 cache_creation_tokens: None,
-                cost: 0.01,
+                cost,
                 metadata: None,
             })
             .unwrap();
@@ -631,6 +673,51 @@ mod tests {
 
         assert_eq!(backend.get_receipt(id).unwrap().unwrap().cwd, "/known");
         assert_eq!(backend.get_receipt(999_999).unwrap(), None);
+    }
+
+    #[test]
+    fn list_receipt_summaries_returns_empty_for_fresh_database() {
+        let (_dir, backend) = test_backend();
+
+        let summaries = backend.list_receipt_summaries().unwrap();
+
+        assert!(summaries.is_empty());
+    }
+
+    #[test]
+    fn list_receipt_summaries_aggregates_across_receipts() {
+        let (_dir, backend) = test_backend();
+        let session_id = insert_session(backend.database(), "/summaries", 1_777_593_600);
+        let r1 = ReceiptRepository::new(backend.database().clone())
+            .upsert_by_cwd_date(Some(session_id), "/summaries-1", 1_777_593_600)
+            .unwrap()
+            .id;
+        let r2 = insert_receipt(backend.database(), "/summaries-2", 1_777_680_000);
+        let r3 = insert_receipt(backend.database(), "/summaries-3", 1_777_766_400);
+
+        insert_item_with_cost(backend.database(), r1, session_id, "req-1", 100, 1.0);
+        insert_item_with_cost(backend.database(), r1, session_id, "req-2", 200, 0.5);
+        let r2_session_id = backend
+            .get_receipt(r2)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .unwrap();
+        insert_item_with_cost(backend.database(), r2, r2_session_id, "req-3", 300, 0.25);
+
+        let summaries = backend.list_receipt_summaries().unwrap();
+        let by_receipt: std::collections::HashMap<i64, (f64, i64)> = summaries
+            .into_iter()
+            .map(|summary| (summary.receipt_id, (summary.total_cost, summary.item_count)))
+            .collect();
+
+        assert_eq!(by_receipt.len(), 3);
+        assert!((by_receipt[&r1].0 - 1.5).abs() < 1e-9);
+        assert_eq!(by_receipt[&r1].1, 2);
+        assert!((by_receipt[&r2].0 - 0.25).abs() < 1e-9);
+        assert_eq!(by_receipt[&r2].1, 1);
+        assert!((by_receipt[&r3].0 - 0.0).abs() < 1e-9);
+        assert_eq!(by_receipt[&r3].1, 0);
     }
 
     #[test]
@@ -768,7 +855,9 @@ mod tests {
             let mut final_len = 0usize;
             for _ in 0..500 {
                 final_len = reader_backend.list_receipts(None).unwrap().len();
-                if final_len >= 100 { break; }
+                if final_len >= 100 {
+                    break;
+                }
             }
             final_len
         });
@@ -1140,8 +1229,7 @@ mod tests {
             recorded.iter().all(|(name, _)| name == "receipt-added"),
             "all events must be receipt-added"
         );
-        let ids: std::collections::HashSet<i64> =
-            recorded.iter().map(|(_, r)| r.id).collect();
+        let ids: std::collections::HashSet<i64> = recorded.iter().map(|(_, r)| r.id).collect();
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
         assert!(ids.contains(&id3));

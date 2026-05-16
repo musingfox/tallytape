@@ -14,6 +14,14 @@ pub struct Receipt {
     pub updated_at: i64,
 }
 
+/// Aggregated totals for a receipt from the `v_receipt_totals` view.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReceiptSummary {
+    pub receipt_id: i64,
+    pub total_cost: f64,
+    pub item_count: i64,
+}
+
 /// Data-access object for the `receipts` table.
 pub struct ReceiptRepository {
     db: Database,
@@ -117,6 +125,30 @@ impl ReceiptRepository {
             receipts.push(row.context("list: query failed")?);
         }
         Ok(receipts)
+    }
+
+    /// Return aggregated totals for all receipts from the `v_receipt_totals` view.
+    pub fn list_summaries(&self) -> anyhow::Result<Vec<ReceiptSummary>> {
+        let conn = self.db.lock();
+        let mut stmt = conn
+            .prepare("SELECT receipt_id, item_count, total_cost FROM v_receipt_totals")
+            .context("list_summaries: query failed")?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ReceiptSummary {
+                    receipt_id: row.get(0)?,
+                    item_count: row.get(1)?,
+                    total_cost: row.get(2)?,
+                })
+            })
+            .context("list_summaries: query failed")?;
+
+        let mut summaries = Vec::new();
+        for row in rows {
+            summaries.push(row.context("list_summaries: query failed")?);
+        }
+        Ok(summaries)
     }
 
     /// Return receipts whose `date` column is within `[start_date, end_date]` (inclusive).
