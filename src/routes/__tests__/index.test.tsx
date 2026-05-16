@@ -232,4 +232,141 @@ describe("ReceiptTable", () => {
 
     await waitFor(() => expect(screen.getAllByRole("row")).toHaveLength(101));
   });
+
+  it("activates a row with Space and prevents default scroll", async () => {
+    seedReceipts([receipt({ id: 9, cwd: "/space", date: "2026-05-15" })]);
+    const router = renderIndex();
+    const row = (await screen.findByText("/space")).closest("tr") as HTMLTableRowElement;
+    row.focus();
+    const event = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    row.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    await waitFor(() => expect(router.state.location.pathname).toBe("/receipts/9"));
+  });
+
+  it("does not navigate on unrelated keys", async () => {
+    seedReceipts([receipt({ id: 9, cwd: "/x", date: "2026-05-15" })]);
+    const router = renderIndex();
+    const row = (await screen.findByText("/x")).closest("tr") as HTMLTableRowElement;
+    fireEvent.keyDown(row, { key: "a" });
+    expect(router.state.location.pathname).toBe("/");
+  });
+
+  it("exposes exactly one initial tab stop and rotates tabIndex on ArrowDown", async () => {
+    seedReceipts([
+      receipt({ id: 1, cwd: "r1", date: "2026-05-15" }),
+      receipt({ id: 2, cwd: "r2", date: "2026-05-14" }),
+      receipt({ id: 3, cwd: "r3", date: "2026-05-13" }),
+    ]);
+    renderIndex();
+    await waitFor(() => expect(screen.getAllByRole("row")).toHaveLength(4));
+    const bodyRows = screen.getAllByRole("row").slice(1) as HTMLTableRowElement[];
+    expect(bodyRows.map((r) => r.tabIndex)).toEqual([0, -1, -1]);
+    bodyRows[0].focus();
+    fireEvent.keyDown(bodyRows[0], { key: "ArrowDown" });
+    expect(document.activeElement).toBe(bodyRows[1]);
+    expect(bodyRows.map((r) => r.tabIndex)).toEqual([-1, 0, -1]);
+  });
+
+  it("does not wrap at the boundaries and supports Home/End", async () => {
+    seedReceipts([
+      receipt({ id: 1, cwd: "r1", date: "2026-05-15" }),
+      receipt({ id: 2, cwd: "r2", date: "2026-05-14" }),
+      receipt({ id: 3, cwd: "r3", date: "2026-05-13" }),
+    ]);
+    renderIndex();
+    const bodyRows = (await screen.findAllByRole("row")).slice(1) as HTMLTableRowElement[];
+    bodyRows[0].focus();
+    fireEvent.keyDown(bodyRows[0], { key: "ArrowUp" });
+    expect(document.activeElement).toBe(bodyRows[0]);
+    fireEvent.keyDown(bodyRows[0], { key: "End" });
+    expect(document.activeElement).toBe(bodyRows[2]);
+    fireEvent.keyDown(bodyRows[2], { key: "ArrowDown" });
+    expect(document.activeElement).toBe(bodyRows[2]);
+    fireEvent.keyDown(bodyRows[2], { key: "Home" });
+    expect(document.activeElement).toBe(bodyRows[0]);
+  });
+
+  it("attaches the focus-visible ring utility classes to each interactive row", async () => {
+    seedReceipts([receipt({ id: 1, cwd: "/fr", date: "2026-05-15" })]);
+    renderIndex();
+    const row = (await screen.findByText("/fr")).closest("tr") as HTMLTableRowElement;
+    expect(row.className).toMatch(/focus-visible:ring-2/);
+    expect(row.className).toMatch(/focus-visible:ring-inset/);
+    expect(row.className).not.toMatch(/(^|\s)focus:ring/);
+  });
+
+  it("labels each interactive row with an SR-friendly action phrase", async () => {
+    seedReceipts([receipt({ id: 1, cwd: "/foo", date: "2026-05-15" })]);
+    renderIndex();
+    const row = (await screen.findByText("/foo")).closest("tr") as HTMLTableRowElement;
+    expect(row.getAttribute("aria-label")).toBe("View receipt for /foo on 2026-05-15");
+  });
+
+  it("does not attach interactive aria-label to skeleton rows", async () => {
+    useReceiptStore.setState({ loadStatus: "loading", receipts: new Map() });
+    renderIndex();
+    const skeletons = await screen.findAllByTestId("skeleton-row");
+    for (const skeleton of skeletons) {
+      expect(skeleton.hasAttribute("aria-label")).toBe(false);
+      expect(skeleton.getAttribute("aria-busy")).toBe("true");
+    }
+  });
+
+  it("marks the Date header with aria-sort=descending and leaves others unset", async () => {
+    seedReceipts([receipt({ id: 1, cwd: "/x", date: "2026-05-15" })]);
+    renderIndex();
+    const dateTh = (await screen.findByText("Date")).closest("th") as HTMLTableCellElement;
+    expect(dateTh.getAttribute("aria-sort")).toBe("descending");
+    expect(screen.getByText("Total").closest("th")?.hasAttribute("aria-sort")).toBe(false);
+    expect(screen.getByText("CWD").closest("th")?.hasAttribute("aria-sort")).toBe(false);
+    expect(screen.getByText("Items").closest("th")?.hasAttribute("aria-sort")).toBe(false);
+  });
+
+  it("labels Total and Items cells with units and currency", async () => {
+    seedReceipts([
+      receipt({ id: 1, cwd: "/two", date: "2026-05-15" }),
+      receipt({ id: 2, cwd: "/one", date: "2026-05-14" }),
+    ]);
+    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+      if (cmd === "list_items_by_receipt") {
+        const id = (args as { receiptId: number }).receiptId;
+        if (id === 1) return [{ cost: 0.1 }, { cost: 0.25 }];
+        if (id === 2) return [{ cost: 1 }];
+      }
+      return [];
+    });
+    renderIndex();
+    await waitFor(() => expect(screen.getByText("0.35")).toBeInTheDocument());
+    const twoCells = within(screen.getByText("/two").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
+    expect(twoCells[2].getAttribute("aria-label")).toBe("Total cost $0.35");
+    expect(twoCells[3].getAttribute("aria-label")).toBe("2 items");
+    const oneCells = within(screen.getByText("/one").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
+    expect(oneCells[3].getAttribute("aria-label")).toBe("1 item");
+  });
+
+  it("labels pending Total/Items cells as Pending", async () => {
+    seedReceipts([receipt({ id: 1, cwd: "/p", date: "2026-05-15" })]);
+    vi.mocked(invoke).mockRejectedValue(new Error("nope"));
+    renderIndex();
+    const row = (await screen.findByText("/p")).closest("tr") as HTMLTableRowElement;
+    await waitFor(() => {
+      const cells = within(row).getAllByRole("cell");
+      expect(cells[2].getAttribute("aria-label")).toBe("Pending");
+      expect(cells[3].getAttribute("aria-label")).toBe("Pending");
+    });
+  });
+
+  it("assigns aria-rowindex starting at 2 for body rows", async () => {
+    seedReceipts([
+      receipt({ id: 1, cwd: "r1", date: "2026-05-15" }),
+      receipt({ id: 2, cwd: "r2", date: "2026-05-14" }),
+      receipt({ id: 3, cwd: "r3", date: "2026-05-13" }),
+    ]);
+    renderIndex();
+    const rows = await screen.findAllByRole("row");
+    expect(rows[1].getAttribute("aria-rowindex")).toBe("2");
+    expect(rows[2].getAttribute("aria-rowindex")).toBe("3");
+    expect(rows[3].getAttribute("aria-rowindex")).toBe("4");
+  });
 });
