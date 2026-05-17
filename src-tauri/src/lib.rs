@@ -8,7 +8,8 @@ use anyhow::Context;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tallytape_core::{
-    db_path, Database, Item, ItemRepository, Receipt, ReceiptRepository, ReceiptSummary,
+    db_path, AggregationBucket, AggregationRepository, Database, Item, ItemRepository,
+    ModelBreakdown, Receipt, ReceiptRepository, ReceiptSummary,
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -37,6 +38,56 @@ impl From<anyhow::Error> for AppError {
 pub struct DateRange {
     pub start_date: String,
     pub end_date: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Granularity {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelBreakdownDto {
+    pub model: String,
+    pub count: i64,
+    pub cost: f64,
+    pub tokens: i64,
+}
+
+impl From<ModelBreakdown> for ModelBreakdownDto {
+    fn from(breakdown: ModelBreakdown) -> Self {
+        Self {
+            model: breakdown.model,
+            count: breakdown.count,
+            cost: breakdown.cost,
+            tokens: breakdown.tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregationBucketDto {
+    pub bucket: String,
+    pub receipt_count: i64,
+    pub total_cost: f64,
+    pub total_tokens: i64,
+    pub model_breakdown: Vec<ModelBreakdownDto>,
+}
+
+impl From<AggregationBucket> for AggregationBucketDto {
+    fn from(bucket: AggregationBucket) -> Self {
+        Self {
+            bucket: bucket.bucket,
+            receipt_count: bucket.receipt_count,
+            total_cost: bucket.total_cost,
+            total_tokens: bucket.total_tokens,
+            model_breakdown: bucket.model_breakdown.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -206,6 +257,20 @@ impl AppBackend {
             .map(|summaries| summaries.into_iter().map(ReceiptSummaryDto::from).collect())
     }
 
+    pub fn get_aggregation(
+        &self,
+        granularity: Granularity,
+        range: DateRange,
+    ) -> anyhow::Result<Vec<AggregationBucketDto>> {
+        let repo = AggregationRepository::new(self.db.clone());
+        let buckets = match granularity {
+            Granularity::Daily => repo.aggregate_daily(&range.start_date, &range.end_date),
+            Granularity::Weekly => repo.aggregate_weekly(&range.start_date, &range.end_date),
+            Granularity::Monthly => repo.aggregate_monthly(&range.start_date, &range.end_date),
+        }?;
+        Ok(buckets.into_iter().map(Into::into).collect())
+    }
+
     pub fn refresh_receipt_snapshot(&self) -> anyhow::Result<()> {
         let snapshot = self.current_receipt_snapshot()?;
         *self
@@ -327,6 +392,18 @@ fn list_items_by_receipt(state: State<'_, AppState>, receipt_id: i64) -> AppResu
 #[tauri::command]
 fn list_receipt_summaries(state: State<'_, AppState>) -> AppResult<Vec<ReceiptSummaryDto>> {
     state.backend.list_receipt_summaries().map_err(app_error)
+}
+
+#[tauri::command]
+fn get_aggregation(
+    state: State<'_, AppState>,
+    granularity: Granularity,
+    date_range: DateRange,
+) -> AppResult<Vec<AggregationBucketDto>> {
+    state
+        .backend
+        .get_aggregation(granularity, date_range)
+        .map_err(app_error)
 }
 
 fn app_error(error: anyhow::Error) -> AppError {
@@ -454,7 +531,8 @@ pub fn run() {
             list_receipts,
             get_receipt,
             list_items_by_receipt,
-            list_receipt_summaries
+            list_receipt_summaries,
+            get_aggregation
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -524,6 +602,26 @@ mod tests {
         occurred_at: i64,
         cost: f64,
     ) {
+        insert_item_with_model(
+            db,
+            receipt_id,
+            session_id,
+            request_id,
+            occurred_at,
+            cost,
+            "claude-opus-4-7",
+        );
+    }
+
+    fn insert_item_with_model(
+        db: &Database,
+        receipt_id: i64,
+        session_id: i64,
+        request_id: &str,
+        occurred_at: i64,
+        cost: f64,
+        model: &str,
+    ) {
         tallytape_core::ItemRepository::new(db.clone())
             .insert(&NewItem {
                 receipt_id,
@@ -534,7 +632,7 @@ mod tests {
                 parent_uuid: None,
                 is_sidechain: false,
                 occurred_at,
-                model: "claude-opus-4-7".to_string(),
+                model: model.to_string(),
                 service_tier: None,
                 input_tokens: 1,
                 output_tokens: 2,
@@ -1329,6 +1427,225 @@ mod tests {
         assert_eq!(recorded[0].1.id, id);
         assert_eq!(recorded[1].0, "receipt-updated");
         assert_eq!(recorded[1].1.id, id);
+    }
+
+    #[test]
+    fn get_aggregation_daily_groups_same_day_receipts_by_model() {
+        let (_dir, backend) = test_backend();
+        let session_1 = insert_session(backend.database(), "/daily-1", 1_778_976_000);
+        let receipt_1 = ReceiptRepository::new(backend.database().clone())
+            .upsert_by_cwd_date(Some(session_1), "/daily-1", 1_778_976_000)
+            .unwrap()
+            .id;
+        let session_2 = insert_session(backend.database(), "/daily-2", 1_778_979_600);
+        let receipt_2 = ReceiptRepository::new(backend.database().clone())
+            .upsert_by_cwd_date(Some(session_2), "/daily-2", 1_778_979_600)
+            .unwrap()
+            .id;
+        insert_item_with_model(
+            backend.database(),
+            receipt_1,
+            session_1,
+            "daily-1",
+            1,
+            0.01,
+            "gpt-4",
+        );
+        insert_item_with_model(
+            backend.database(),
+            receipt_2,
+            session_2,
+            "daily-2",
+            2,
+            0.02,
+            "claude-3",
+        );
+
+        let result = backend
+            .get_aggregation(
+                Granularity::Daily,
+                DateRange {
+                    start_date: "2026-05-17".to_string(),
+                    end_date: "2026-05-17".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].bucket, "2026-05-17");
+        assert_eq!(result[0].receipt_count, 2);
+        assert_eq!(result[0].model_breakdown.len(), 2);
+    }
+
+    #[test]
+    fn get_aggregation_weekly_groups_iso_week_across_year_boundary() {
+        let (_dir, backend) = test_backend();
+        let receipt_1 = insert_receipt(backend.database(), "/week-1", 1_798_416_000);
+        let session_1 = backend
+            .get_receipt(receipt_1)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .unwrap();
+        let receipt_2 = insert_receipt(backend.database(), "/week-2", 1_798_934_400);
+        let session_2 = backend
+            .get_receipt(receipt_2)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .unwrap();
+        insert_item_with_model(
+            backend.database(),
+            receipt_1,
+            session_1,
+            "week-1",
+            1,
+            0.01,
+            "gpt-4",
+        );
+        insert_item_with_model(
+            backend.database(),
+            receipt_2,
+            session_2,
+            "week-2",
+            2,
+            0.02,
+            "gpt-4",
+        );
+
+        let result = backend
+            .get_aggregation(
+                Granularity::Weekly,
+                DateRange {
+                    start_date: "2026-12-28".to_string(),
+                    end_date: "2027-01-03".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].bucket, "2026-W53");
+        assert_eq!(result[0].receipt_count, 2);
+    }
+
+    #[test]
+    fn get_aggregation_monthly_orders_buckets_across_month_boundary() {
+        let (_dir, backend) = test_backend();
+        let receipt_1 = insert_receipt(backend.database(), "/month-1", 1_777_507_200);
+        let session_1 = backend
+            .get_receipt(receipt_1)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .unwrap();
+        let receipt_2 = insert_receipt(backend.database(), "/month-2", 1_777_593_600);
+        let session_2 = backend
+            .get_receipt(receipt_2)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .unwrap();
+        insert_item_with_model(
+            backend.database(),
+            receipt_1,
+            session_1,
+            "month-1",
+            1,
+            0.01,
+            "gpt-4",
+        );
+        insert_item_with_model(
+            backend.database(),
+            receipt_2,
+            session_2,
+            "month-2",
+            2,
+            0.02,
+            "gpt-4",
+        );
+
+        let result = backend
+            .get_aggregation(
+                Granularity::Monthly,
+                DateRange {
+                    start_date: "2026-04-01".to_string(),
+                    end_date: "2026-05-31".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result
+                .iter()
+                .map(|bucket| bucket.bucket.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-04", "2026-05"]
+        );
+    }
+
+    #[test]
+    fn get_aggregation_empty_range_returns_empty_vec() {
+        let (_dir, backend) = test_backend();
+
+        let result = backend
+            .get_aggregation(
+                Granularity::Daily,
+                DateRange {
+                    start_date: "2030-01-01".to_string(),
+                    end_date: "2030-01-31".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn aggregation_dto_serializes_camel_case_wire_shape() {
+        let (_dir, backend) = test_backend();
+        let receipt = insert_receipt(backend.database(), "/dto", 1_778_976_000);
+        let session = backend
+            .get_receipt(receipt)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .unwrap();
+        insert_item_with_model(
+            backend.database(),
+            receipt,
+            session,
+            "dto",
+            1,
+            0.01,
+            "gpt-4",
+        );
+
+        let result = backend
+            .get_aggregation(
+                Granularity::Daily,
+                DateRange {
+                    start_date: "2026-05-17".to_string(),
+                    end_date: "2026-05-17".to_string(),
+                },
+            )
+            .unwrap();
+        let value = serde_json::to_value(&result).unwrap();
+        let bucket = &value[0];
+
+        assert!(value.is_array());
+        assert!(bucket["bucket"].is_string());
+        assert!(bucket["receiptCount"].is_number());
+        assert!(bucket["totalCost"].is_number());
+        assert!(bucket["totalTokens"].is_number());
+        assert!(bucket["modelBreakdown"].is_array());
+        assert!(bucket.get("receipt_count").is_none());
+        let breakdown = bucket["modelBreakdown"][0].as_object().unwrap();
+        assert_eq!(breakdown.len(), 4);
+        assert!(breakdown.contains_key("model"));
+        assert!(breakdown.contains_key("count"));
+        assert!(breakdown.contains_key("cost"));
+        assert!(breakdown.contains_key("tokens"));
     }
 
     // C7: Real-notify smoke test (ignored — non-deterministic on macOS FSEvents)

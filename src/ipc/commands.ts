@@ -1,5 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppError, DateRange, ItemDto, ReceiptDto, ReceiptSummaryDto } from './types';
+import type {
+  AggregationBucketDto,
+  AppError,
+  DateRange,
+  Granularity,
+  ItemDto,
+  ReceiptDto,
+  ReceiptSummaryDto,
+} from './types';
 
 /**
  * Rust command source: src-tauri/src/lib.rs:281.
@@ -31,6 +39,17 @@ export async function listItemsByReceipt(receiptId: number): Promise<ItemDto[]> 
  */
 export async function listReceiptSummaries(): Promise<ReceiptSummaryDto[]> {
   return invoke<ReceiptSummaryDto[]>('list_receipt_summaries');
+}
+
+/**
+ * Rust command source: src-tauri/src/lib.rs:357.
+ * Rejected promises carry an AppError-shaped payload ({ message: string }).
+ */
+export function getAggregation(
+  granularity: Granularity,
+  dateRange: DateRange,
+): Promise<AggregationBucketDto[]> {
+  return invoke<AggregationBucketDto[]>('get_aggregation', { granularity, dateRange });
 }
 
 export type { AppError };

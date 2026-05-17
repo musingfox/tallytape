@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import type { AppError, DateRange, ItemDto, ReceiptDto } from '../types';
+import type {
+  AggregationBucketDto,
+  AppError,
+  DateRange,
+  ItemDto,
+  ModelBreakdownDto,
+  ReceiptDto,
+} from '../types';
 
 describe('IPC DTO types', () => {
   it('accepts literals that satisfy the IPC contracts', () => {
@@ -45,5 +52,24 @@ describe('IPC DTO types', () => {
     expect(receipt.id).toBe(1);
     expect(item.receiptId).toBe(1);
     expect(appError.message).toBe('db locked');
+  });
+
+  it('accepts aggregation DTO literals that satisfy the IPC contracts', () => {
+    const breakdown = {
+      model: 'gpt-4',
+      count: 3,
+      cost: 1.23,
+      tokens: 4567,
+    } satisfies ModelBreakdownDto;
+
+    const bucket = {
+      bucket: '2026-05',
+      receiptCount: 3,
+      totalCost: 1.23,
+      totalTokens: 4567,
+      modelBreakdown: [breakdown],
+    } satisfies AggregationBucketDto;
+
+    expect(bucket.modelBreakdown[0].model).toBe('gpt-4');
   });
 });

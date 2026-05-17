@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { getReceipt, listItemsByReceipt, listReceiptSummaries, listReceipts } from '../commands';
-import type { ItemDto, ReceiptDto, ReceiptSummaryDto } from '../types';
+import {
+  getAggregation,
+  getReceipt,
+  listItemsByReceipt,
+  listReceiptSummaries,
+  listReceipts,
+} from '../commands';
+import type { AggregationBucketDto, ItemDto, ReceiptDto, ReceiptSummaryDto } from '../types';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -57,6 +63,14 @@ const summary1: ReceiptSummaryDto = {
   receiptId: 7,
   totalCost: 0.35,
   itemCount: 2,
+};
+
+const aggregation1: AggregationBucketDto = {
+  bucket: '2026-05-17',
+  receiptCount: 1,
+  totalCost: 0.01,
+  totalTokens: 100,
+  modelBreakdown: [{ model: 'gpt-4', count: 1, cost: 0.01, tokens: 100 }],
 };
 
 beforeEach(() => {
@@ -134,6 +148,58 @@ describe('IPC command wrappers', () => {
 
       await expect(listReceiptSummaries()).resolves.toEqual([summary1]);
       expect(mockedInvoke).toHaveBeenCalledWith('list_receipt_summaries');
+    });
+  });
+
+  describe('getAggregation', () => {
+    const dateRange = { startDate: '2026-05-17', endDate: '2026-05-17' };
+
+    it('calls get_aggregation with daily granularity and returns buckets', async () => {
+      mockedInvoke.mockResolvedValueOnce([aggregation1]);
+
+      await expect(getAggregation('daily', dateRange)).resolves.toEqual([aggregation1]);
+      expect(mockedInvoke).toHaveBeenCalledWith('get_aggregation', {
+        granularity: 'daily',
+        dateRange,
+      });
+    });
+
+    it('calls get_aggregation with weekly granularity', async () => {
+      mockedInvoke.mockResolvedValueOnce([aggregation1]);
+
+      await getAggregation('weekly', dateRange);
+
+      expect(mockedInvoke).toHaveBeenCalledWith('get_aggregation', {
+        granularity: 'weekly',
+        dateRange,
+      });
+    });
+
+    it('calls get_aggregation with monthly granularity', async () => {
+      mockedInvoke.mockResolvedValueOnce([aggregation1]);
+
+      await getAggregation('monthly', dateRange);
+
+      expect(mockedInvoke).toHaveBeenCalledWith('get_aggregation', {
+        granularity: 'monthly',
+        dateRange,
+      });
+    });
+
+    it('rejects invalid granularity errors from invoke', async () => {
+      mockedInvoke.mockRejectedValueOnce({
+        message: 'unknown variant "quarterly", expected one of "daily", "weekly", "monthly"',
+      });
+
+      await expect(getAggregation('quarterly' as any, dateRange)).rejects.toMatchObject({
+        message: expect.stringContaining('quarterly'),
+      });
+    });
+
+    it('resolves to an empty array for empty ranges', async () => {
+      mockedInvoke.mockResolvedValueOnce([]);
+
+      await expect(getAggregation('daily', dateRange)).resolves.toEqual([]);
     });
   });
 });

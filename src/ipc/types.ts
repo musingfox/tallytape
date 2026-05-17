@@ -46,3 +46,23 @@ export interface ReceiptSummaryDto {
   totalCost: number;
   itemCount: number;
 }
+
+/** Rust source: src-tauri/src/lib.rs:43 */
+export type Granularity = 'daily' | 'weekly' | 'monthly';
+
+/** Rust source: src-tauri/src/lib.rs:51 */
+export interface ModelBreakdownDto {
+  model: string;
+  count: number;
+  cost: number;
+  tokens: number;
+}
+
+/** Rust source: src-tauri/src/lib.rs:72 */
+export interface AggregationBucketDto {
+  bucket: string;
+  receiptCount: number;
+  totalCost: number;
+  totalTokens: number;
+  modelBreakdown: ModelBreakdownDto[];
+}
