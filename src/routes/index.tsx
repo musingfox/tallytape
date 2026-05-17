@@ -1,9 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { listReceiptSummaries, type ReceiptSummaryDto } from "../ipc";
+import { listReceiptSummaries, listReceipts, type ReceiptSummaryDto } from "../ipc";
 import { formatCost } from "./receipts/aggregate";
 import { useReceiptEvents } from "../receipts/useReceiptEvents";
-import { useReceiptList, useReceiptLoadStatus } from "../receipts/store";
+import { useDateFilter, useReceiptList, useReceiptLoadStatus, useReceiptStore } from "../receipts/store";
 import { useCounterStore } from "../store/counter";
 
 export const Route = createFileRoute("/")({
@@ -12,11 +12,38 @@ export const Route = createFileRoute("/")({
 
 function Index() {
   const count = useCounterStore((state) => state.count);
+  const dateFilter = useDateFilter();
   useReceiptEvents();
+
+  useEffect(() => {
+    let cancelled = false;
+    const range = dateFilter ? { startDate: dateFilter, endDate: dateFilter } : null;
+
+    void listReceipts(range)
+      .then((list) => {
+        if (!cancelled) {
+          useReceiptStore.getState().setReceipts(list);
+        }
+      })
+      .catch((caught: unknown) => {
+        if (!cancelled) {
+          useReceiptStore.getState().pushError(caught instanceof Error ? caught.message : String(caught));
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dateFilter]);
 
   return (
     <div className="p-4">
       <p className="mt-2">Count: {count}</p>
+      {dateFilter && (
+        <button type="button" className="my-2 rounded border px-2 py-1" onClick={() => useReceiptStore.getState().setDateFilter(null)}>
+          Clear filter
+        </button>
+      )}
       <ReceiptTable />
     </div>
   );

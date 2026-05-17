@@ -1,4 +1,4 @@
-import { createRootRoute, Outlet } from "@tanstack/react-router";
+import { Link, createRootRoute, Outlet } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 import { Toaster } from "../components/Toaster";
 
@@ -15,6 +15,7 @@ export const Route = createRootRoute({
     <>
       <header role="banner">
         <h1>TallyTape</h1>
+        <Link to="/dashboard">Dashboard</Link>
       </header>
       <main>
         <Outlet />

@@ -1,6 +1,7 @@
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
+  useDateFilter,
   usePendingArrivals,
   useReceiptById,
   useReceiptList,
@@ -44,6 +45,7 @@ beforeEach(() => {
     loadStatus: 'idle',
     loadError: null,
     errors: [],
+    dateFilter: null,
   });
 });
 
@@ -165,6 +167,14 @@ describe('receipt store actions', () => {
     expect(useReceiptStore.getState().errors).toHaveLength(1);
   });
 
+  it('setDateFilter stores and clears the active date filter', () => {
+    useReceiptStore.getState().setDateFilter('2026-05-17');
+    expect(useReceiptStore.getState().dateFilter).toBe('2026-05-17');
+
+    useReceiptStore.getState().setDateFilter(null);
+    expect(useReceiptStore.getState().dateFilter).toBeNull();
+  });
+
   it('setReceipts → addReceipt → updateReceipt flow preserves monotonic updatedAt deduplication', () => {
     useReceiptStore.getState().setReceipts([r1]);
     expect(useReceiptStore.getState().receipts.size).toBe(1);
@@ -219,6 +229,16 @@ describe('receipt store selector hooks', () => {
     useReceiptStore.getState().selectReceipt(999);
     const missing = renderHook(() => useSelectedReceipt());
     expect(missing.result.current).toBeNull();
+  });
+
+  it('useDateFilter reflects filter changes reactively', () => {
+    const { result } = renderHook(() => useDateFilter());
+    expect(result.current).toBeNull();
+
+    act(() => {
+      useReceiptStore.getState().setDateFilter('2026-05-17');
+    });
+    expect(result.current).toBe('2026-05-17');
   });
 
   it('usePendingArrivals reflects queue state', () => {

@@ -1,1 +1,10 @@
 @import "tailwindcss";
+
+@theme {
+  --color-heat-empty: #d1d5db;
+  --color-heat-0: #ebedf0;
+  --color-heat-1: #9be9a8;
+  --color-heat-2: #40c463;
+  --color-heat-3: #30a14e;
+  --color-heat-4: #216e39;
+}

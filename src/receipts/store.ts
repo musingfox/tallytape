@@ -18,6 +18,7 @@ interface ReceiptState {
   loadStatus: ReceiptLoadStatus;
   loadError: string | null;
   errors: ReceiptError[];
+  dateFilter: string | null;
   setReceipts: (list: Receipt[]) => void;
   addReceipt: (r: Receipt) => void;
   updateReceipt: (r: Receipt) => void;
@@ -26,6 +27,7 @@ interface ReceiptState {
   setLoadStatus: (status: ReceiptLoadStatus, error?: string | null) => void;
   pushError: (message: string) => string;
   dismissError: (id: string) => void;
+  setDateFilter: (date: string | null) => void;
 }
 
 export const useReceiptStore = create<ReceiptState>()(
@@ -37,6 +39,7 @@ export const useReceiptStore = create<ReceiptState>()(
       loadStatus: 'idle',
       loadError: null,
       errors: [],
+      dateFilter: null,
 
       setReceipts(list: Receipt[]) {
         set((state) => {
@@ -99,6 +102,10 @@ export const useReceiptStore = create<ReceiptState>()(
       dismissError(id: string) {
         set((state) => ({ errors: state.errors.filter((error) => error.id !== id) }));
       },
+
+      setDateFilter(date: string | null) {
+        set({ dateFilter: date });
+      },
     }),
     { name: 'receipts' },
   ),
@@ -127,4 +134,8 @@ export function usePendingArrivals(): Receipt[] {
 
 export function useReceiptLoadStatus(): { status: ReceiptLoadStatus; error: string | null } {
   return useReceiptStore(useShallow((state) => ({ status: state.loadStatus, error: state.loadError })));
+}
+
+export function useDateFilter(): string | null {
+  return useReceiptStore((state) => state.dateFilter);
 }

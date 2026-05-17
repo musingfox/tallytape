@@ -35,6 +35,7 @@ function seedReceipts(receipts: Receipt[]) {
     loadStatus: 'ready',
     loadError: null,
     errors: [],
+    dateFilter: null,
   });
 }
 
@@ -53,7 +54,12 @@ beforeEach(() => {
   window.scrollTo = vi.fn();
   seedReceipts([]);
   vi.mocked(invoke).mockReset();
-  vi.mocked(invoke).mockResolvedValue([]);
+  vi.mocked(invoke).mockImplementation(async (cmd) => {
+    if (cmd === "list_receipts") {
+      return Array.from(useReceiptStore.getState().receipts.values());
+    }
+    return [];
+  });
 });
 
 describe("ReceiptTable", () => {
@@ -174,6 +180,9 @@ describe("ReceiptTable", () => {
           { receiptId: 3, totalCost: 0, itemCount: 0 },
         ];
       }
+      if (cmd === "list_receipts") {
+        return Array.from(useReceiptStore.getState().receipts.values());
+      }
       return [];
     });
 
@@ -205,29 +214,30 @@ describe("ReceiptTable", () => {
     ]);
     let resolveFirst: (value: unknown) => void = () => {};
     let resolveSecond: (value: unknown) => void = () => {};
-    vi.mocked(invoke)
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
+    let summaryCall = 0;
+    vi.mocked(invoke).mockImplementation((cmd) => {
+      if (cmd === "list_receipt_summaries") {
+        summaryCall += 1;
+        return new Promise((resolve) => {
+          if (summaryCall === 1) {
             resolveFirst = resolve;
-          }),
-      )
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
+          } else {
             resolveSecond = resolve;
-          }),
-      );
+          }
+        });
+      }
+      return Promise.resolve([]);
+    });
 
     renderIndex();
-    await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "list_receipt_summaries")).toHaveLength(1));
 
     seedReceipts([
       receipt({ id: 1, cwd: "stale-a", date: "2026-05-15" }),
       receipt({ id: 2, cwd: "stale-b", date: "2026-05-14" }),
       receipt({ id: 3, cwd: "stale-c", date: "2026-05-13" }),
     ]);
-    await waitFor(() => expect(vi.mocked(invoke)).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "list_receipt_summaries")).toHaveLength(2));
 
     resolveSecond([{ receiptId: 3, totalCost: 9, itemCount: 9 }]);
     await waitFor(() => expect(screen.getByLabelText("Total cost $9.00")).toBeInTheDocument());
@@ -254,6 +264,9 @@ describe("ReceiptTable", () => {
     vi.mocked(invoke).mockImplementation(async (cmd) => {
       if (cmd === "list_receipt_summaries") {
         return [{ receiptId: 1, totalCost: 4, itemCount: 1 }];
+      }
+      if (cmd === "list_receipts") {
+        return Array.from(useReceiptStore.getState().receipts.values());
       }
       return [];
     });
@@ -346,6 +359,41 @@ describe("ReceiptTable", () => {
     expect(row.className).not.toMatch(/(^|\s)focus:ring/);
   });
 
+  it("fetches unfiltered receipts when mounted with no date filter", async () => {
+    renderIndex();
+
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls).toContainEqual(["list_receipts", { dateRange: null }]);
+    });
+  });
+
+  it("fetches receipts for the active date filter and clears it on request", async () => {
+    useReceiptStore.setState({ dateFilter: "2026-05-10" });
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === "list_receipts") {
+        return [receipt({ id: 10, cwd: "/filtered", date: "2026-05-10" })];
+      }
+      return [];
+    });
+
+    renderIndex();
+
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls).toContainEqual([
+        "list_receipts",
+        { dateRange: { startDate: "2026-05-10", endDate: "2026-05-10" } },
+      ]);
+    });
+
+    expect(screen.getByRole("button", { name: "Clear filter" })).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Clear filter"));
+
+    await waitFor(() => {
+      expect(useReceiptStore.getState().dateFilter).toBeNull();
+      expect(vi.mocked(invoke).mock.calls).toContainEqual(["list_receipts", { dateRange: null }]);
+    });
+  }, 15000);
+
   it("labels each interactive row with an SR-friendly action phrase", async () => {
     seedReceipts([receipt({ id: 1, cwd: "/foo", date: "2026-05-15" })]);
     renderIndex();
@@ -384,6 +432,9 @@ describe("ReceiptTable", () => {
           { receiptId: 1, totalCost: 0.35, itemCount: 2 },
           { receiptId: 2, totalCost: 1, itemCount: 1 },
         ];
+      }
+      if (cmd === "list_receipts") {
+        return Array.from(useReceiptStore.getState().receipts.values());
       }
       return [];
     });
