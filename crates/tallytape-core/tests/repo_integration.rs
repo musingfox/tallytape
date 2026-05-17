@@ -762,3 +762,422 @@ mod triggers {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// mod aggregation
+// ---------------------------------------------------------------------------
+mod aggregation {
+    use super::*;
+    use tallytape_core::{AggregationBucket, AggregationRepository, ModelBreakdown};
+
+    fn date_for(db: &Database, ts: i64) -> String {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT date(?1,'unixepoch','localtime')",
+            rusqlite::params![ts],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn bucket_for(db: &Database, fmt: &str, date: &str) -> String {
+        let conn = db.lock();
+        conn.query_row(
+            "SELECT strftime(?1, ?2)",
+            rusqlite::params![fmt, date],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn custom_item(
+        db: &Database,
+        session_id: i64,
+        cwd: &str,
+        ts: i64,
+        model: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+        cost: f64,
+        cache_read_tokens: Option<i64>,
+        cache_creation_tokens: Option<i64>,
+    ) {
+        let receipt = ReceiptRepository::new(db.clone())
+            .upsert_by_cwd_date(Some(session_id), cwd, ts)
+            .expect("upsert receipt");
+        ItemRepository::new(db.clone())
+            .insert(&NewItem {
+                receipt_id: receipt.id,
+                session_id,
+                source: "claude".to_string(),
+                request_id: format!("req-agg-{}", next_id()),
+                message_id: None,
+                parent_uuid: None,
+                is_sidechain: false,
+                occurred_at: ts,
+                model: model.to_string(),
+                service_tier: None,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                cost,
+                metadata: None,
+            })
+            .expect("insert item");
+    }
+
+    fn draft_with_id(
+        request_id: &str,
+        ts: i64,
+        input: i64,
+        output: i64,
+        cost: f64,
+    ) -> NewItemDraft {
+        make_draft(request_id, ts, input, output, cost)
+    }
+
+    #[test]
+    fn daily_multi_model_single_bucket() {
+        let db = open_db();
+        let ts = 1_779_019_200i64;
+        let d = date_for(&db, ts);
+        let session = make_session_with_cwd(&db, "claude", "/agg-t1");
+        custom_item(
+            &db, session.id, "/agg-t1", ts, "opus", 10, 20, 0.10, None, None,
+        );
+        custom_item(
+            &db,
+            session.id,
+            "/agg-t1",
+            ts + 60,
+            "haiku",
+            5,
+            7,
+            0.01,
+            None,
+            None,
+        );
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_daily(&d, &d)
+            .unwrap();
+        assert_eq!(
+            actual,
+            vec![AggregationBucket {
+                bucket: d,
+                receipt_count: 1,
+                total_cost: 0.11,
+                total_tokens: 42,
+                model_breakdown: vec![
+                    ModelBreakdown {
+                        model: "haiku".to_string(),
+                        count: 1,
+                        cost: 0.01,
+                        tokens: 12
+                    },
+                    ModelBreakdown {
+                        model: "opus".to_string(),
+                        count: 1,
+                        cost: 0.10,
+                        tokens: 30
+                    },
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn daily_excludes_cache_tokens() {
+        let db = open_db();
+        let ts = 1_779_019_200i64;
+        let d = date_for(&db, ts);
+        let session = make_session_with_cwd(&db, "claude", "/agg-t2");
+        custom_item(
+            &db,
+            session.id,
+            "/agg-t2",
+            ts,
+            "opus",
+            10,
+            20,
+            0.10,
+            Some(1000),
+            Some(500),
+        );
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_daily(&d, &d)
+            .unwrap();
+        assert_eq!(actual[0].total_tokens, 30);
+        assert_eq!(actual[0].model_breakdown[0].tokens, 30);
+    }
+
+    #[test]
+    fn daily_empty_range() {
+        let db = open_db();
+        let actual = AggregationRepository::new(db)
+            .aggregate_daily("2026-05-01", "2026-05-31")
+            .unwrap();
+        assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn daily_zero_item_receipt_excluded() {
+        let db = open_db();
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT INTO receipts (session_id, cwd, date) VALUES (NULL, '/empty', '2026-05-17')",
+                [],
+            )
+            .unwrap();
+        }
+        let session = make_session_with_cwd(&db, "claude", "/agg-t4");
+        let ts = 1_779_105_600i64; // 2026-05-18 12:00 UTC
+        let d = date_for(&db, ts);
+        merge_item(&db, session.id, draft_with_id("req-t4", ts, 1, 2, 0.01)).unwrap();
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_daily("2026-05-17", &d)
+            .unwrap();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].bucket, d);
+    }
+
+    #[test]
+    fn daily_sparse_multi_day_range() {
+        let db = open_db();
+        let session = make_session_with_cwd(&db, "claude", "/agg-t5");
+        let t1 = 1_777_636_800i64; // 2026-05-01 12:00 UTC
+        let t5 = 1_777_982_400i64; // 2026-05-05 12:00 UTC
+        let d1 = date_for(&db, t1);
+        let d5 = date_for(&db, t5);
+        merge_item(&db, session.id, draft_with_id("req-t5a", t1, 1, 1, 0.01)).unwrap();
+        merge_item(&db, session.id, draft_with_id("req-t5b", t5, 1, 1, 0.01)).unwrap();
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_daily(&d1, "2026-05-10")
+            .unwrap();
+        assert_eq!(
+            actual.iter().map(|b| b.bucket.clone()).collect::<Vec<_>>(),
+            vec![d1, d5]
+        );
+    }
+
+    #[test]
+    fn daily_boundary_inclusive() {
+        let db = open_db();
+        let session = make_session_with_cwd(&db, "claude", "/agg-t6");
+        let t1 = 1_777_636_800i64;
+        let t2 = t1 + 86_400;
+        let t3 = t2 + 86_400;
+        let d1 = date_for(&db, t1);
+        let d2 = date_for(&db, t2);
+        merge_item(&db, session.id, draft_with_id("req-t6a", t1, 1, 1, 0.01)).unwrap();
+        merge_item(&db, session.id, draft_with_id("req-t6b", t2, 1, 1, 0.01)).unwrap();
+        merge_item(&db, session.id, draft_with_id("req-t6c", t3, 1, 1, 0.01)).unwrap();
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_daily(&d1, &d2)
+            .unwrap();
+        assert_eq!(actual.len(), 2);
+        assert_eq!(
+            actual.iter().map(|b| b.bucket.clone()).collect::<Vec<_>>(),
+            vec![d1, d2]
+        );
+    }
+
+    #[test]
+    fn weekly_year_crossover_iso_week() {
+        let db = open_db();
+        let session = make_session_with_cwd(&db, "claude", "/agg-t7");
+        let t1 = 1_798_459_200i64;
+        let t2 = 1_798_977_600i64;
+        let d1 = date_for(&db, t1);
+        let d2 = date_for(&db, t2);
+        let w1 = bucket_for(&db, "%G-W%V", &d1);
+        let w2 = bucket_for(&db, "%G-W%V", &d2);
+        assert_eq!(w1, w2);
+        merge_item(&db, session.id, draft_with_id("req-t7a", t1, 10, 20, 0.10)).unwrap();
+        merge_item(&db, session.id, draft_with_id("req-t7b", t2, 5, 7, 0.01)).unwrap();
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_weekly(&d1, &d2)
+            .unwrap();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].bucket, w1);
+        assert_eq!(actual[0].receipt_count, 2);
+        assert_eq!(actual[0].total_tokens, 42);
+        assert!((actual[0].total_cost - 0.11).abs() < 1e-9);
+    }
+
+    #[test]
+    fn weekly_week_change_ordered() {
+        let db = open_db();
+        let session = make_session_with_cwd(&db, "claude", "/agg-t8");
+        let sunday = 1_798_977_600i64;
+        let monday = 1_799_064_000i64;
+        let d1 = date_for(&db, sunday);
+        let d2 = date_for(&db, monday);
+        let w1 = bucket_for(&db, "%G-W%V", &d1);
+        let w2 = bucket_for(&db, "%G-W%V", &d2);
+        merge_item(
+            &db,
+            session.id,
+            draft_with_id("req-t8a", monday, 1, 1, 0.01),
+        )
+        .unwrap();
+        merge_item(
+            &db,
+            session.id,
+            draft_with_id("req-t8b", sunday, 1, 1, 0.01),
+        )
+        .unwrap();
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_weekly(&d1, &d2)
+            .unwrap();
+        assert_eq!(
+            actual.iter().map(|b| b.bucket.clone()).collect::<Vec<_>>(),
+            vec![w1, w2]
+        );
+    }
+
+    #[test]
+    fn weekly_empty_range() {
+        let db = open_db();
+        assert!(AggregationRepository::new(db)
+            .aggregate_weekly("2026-05-01", "2026-05-07")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn monthly_month_boundary() {
+        let db = open_db();
+        let session = make_session_with_cwd(&db, "claude", "/agg-t10");
+        let t1 = 1_777_550_400i64; // 2026-04-30 12:00 UTC
+        let t2 = 1_777_636_800i64; // 2026-05-01 12:00 UTC
+        let d1 = date_for(&db, t1);
+        let d2 = date_for(&db, t2);
+        let m1 = bucket_for(&db, "%Y-%m", &d1);
+        let m2 = bucket_for(&db, "%Y-%m", &d2);
+        merge_item(&db, session.id, draft_with_id("req-t10a", t1, 1, 1, 0.01)).unwrap();
+        merge_item(&db, session.id, draft_with_id("req-t10b", t2, 1, 1, 0.01)).unwrap();
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_monthly(&d1, &d2)
+            .unwrap();
+        assert_eq!(
+            actual.iter().map(|b| b.bucket.clone()).collect::<Vec<_>>(),
+            vec![m1, m2]
+        );
+    }
+
+    #[test]
+    fn monthly_multi_receipt_same_month() {
+        let db = open_db();
+        let t = 1_779_019_200i64;
+        let d = date_for(&db, t);
+        for (idx, cwd) in ["/agg-t11a", "/agg-t11b", "/agg-t11c"].iter().enumerate() {
+            let session = make_session_with_cwd(&db, "claude", cwd);
+            merge_item(
+                &db,
+                session.id,
+                draft_with_id(&format!("req-t11-{idx}"), t + idx as i64 * 60, 10, 20, 0.10),
+            )
+            .unwrap();
+        }
+        let actual = AggregationRepository::new(db)
+            .aggregate_monthly(&d, &d)
+            .unwrap();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].receipt_count, 3);
+        assert_eq!(actual[0].total_tokens, 90);
+        assert!((actual[0].total_cost - 0.30).abs() < 1e-9);
+    }
+
+    #[test]
+    fn monthly_empty_range() {
+        let db = open_db();
+        assert!(AggregationRepository::new(db)
+            .aggregate_monthly("2026-05-01", "2026-05-31")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn mixed_model_deterministic_order() {
+        let db = open_db();
+        let ts = 1_779_019_200i64;
+        let d = date_for(&db, ts);
+        let session = make_session_with_cwd(&db, "claude", "/agg-t13");
+        custom_item(
+            &db, session.id, "/agg-t13", ts, "zeta-1", 1, 1, 0.01, None, None,
+        );
+        custom_item(
+            &db,
+            session.id,
+            "/agg-t13",
+            ts + 1,
+            "alpha-1",
+            1,
+            1,
+            0.01,
+            None,
+            None,
+        );
+        custom_item(
+            &db,
+            session.id,
+            "/agg-t13",
+            ts + 2,
+            "middle",
+            1,
+            1,
+            0.01,
+            None,
+            None,
+        );
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_daily(&d, &d)
+            .unwrap();
+        assert_eq!(
+            actual[0]
+                .model_breakdown
+                .iter()
+                .map(|m| m.model.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "alpha-1".to_string(),
+                "middle".to_string(),
+                "zeta-1".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_bucket_order_ascending() {
+        let db = open_db();
+        let session = make_session_with_cwd(&db, "claude", "/agg-t14");
+        let t1 = 1_777_636_800i64;
+        let t2 = t1 + 86_400;
+        let t3 = t2 + 86_400;
+        let d1 = date_for(&db, t1);
+        let d2 = date_for(&db, t2);
+        let d3 = date_for(&db, t3);
+        merge_item(&db, session.id, draft_with_id("req-t14c", t3, 1, 1, 0.01)).unwrap();
+        merge_item(&db, session.id, draft_with_id("req-t14a", t1, 1, 1, 0.01)).unwrap();
+        merge_item(&db, session.id, draft_with_id("req-t14b", t2, 1, 1, 0.01)).unwrap();
+
+        let actual = AggregationRepository::new(db)
+            .aggregate_daily(&d1, &d3)
+            .unwrap();
+        assert_eq!(
+            actual.iter().map(|b| b.bucket.clone()).collect::<Vec<_>>(),
+            vec![d1, d2, d3]
+        );
+    }
+}
