@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tallytape_core::{
     merge_item, Database, ItemRepository, NewItem, NewItemDraft, NewSession, ReceiptRepository,
-    SessionRepository,
+    SessionRepository, SummaryRepository,
 };
 
 // ---------------------------------------------------------------------------
@@ -1179,5 +1179,134 @@ mod aggregation {
             actual.iter().map(|b| b.bucket.clone()).collect::<Vec<_>>(),
             vec![d1, d2, d3]
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mod summary
+// ---------------------------------------------------------------------------
+mod summary {
+    use super::*;
+
+    fn insert_raw_item(
+        db: &Database,
+        receipt_id: i64,
+        session_id: i64,
+        request_id: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+        cost: f64,
+    ) {
+        ItemRepository::new(db.clone())
+            .insert(&NewItem {
+                receipt_id,
+                session_id,
+                source: "claude".to_string(),
+                request_id: request_id.to_string(),
+                message_id: None,
+                parent_uuid: None,
+                is_sidechain: false,
+                occurred_at: 1_767_225_600,
+                model: "claude-opus-4-5".to_string(),
+                service_tier: None,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                cost,
+                metadata: None,
+            })
+            .expect("insert raw item");
+    }
+
+    #[test]
+    fn summarize_totals_across_range() {
+        let db = open_db();
+        let s1 = make_session_with_cwd(&db, "claude", "/summary-a");
+        let s2 = make_session_with_cwd(&db, "claude", "/summary-b");
+
+        merge_item(&db, s1.id, make_draft("summary-t1-a", 1_767_225_600, 100, 100, 0.25)).unwrap();
+        merge_item(&db, s1.id, make_draft("summary-t1-b", 1_767_312_000, 100, 200, 0.25)).unwrap();
+        merge_item(&db, s2.id, make_draft("summary-t1-c", 1_768_435_200, 100, 100, 0.50)).unwrap();
+        merge_item(&db, s2.id, make_draft("summary-t1-d", 1_769_817_600, 200, 100, 0.50)).unwrap();
+
+        let actual = SummaryRepository::new(db)
+            .summarize("2026-01-01", "2026-01-31")
+            .unwrap();
+
+        assert!((actual.total_cost - 1.5).abs() < 1e-9);
+        assert_eq!(actual.total_tokens, 1000);
+        assert_eq!(actual.session_count, 2);
+        assert_eq!(actual.receipt_count, 4);
+    }
+
+    #[test]
+    fn summarize_empty_range_returns_zeroes() {
+        let db = open_db();
+
+        let actual = SummaryRepository::new(db)
+            .summarize("2026-01-01", "2026-01-31")
+            .unwrap();
+
+        assert_eq!(actual.total_cost, 0.0);
+        assert_eq!(actual.total_tokens, 0);
+        assert_eq!(actual.session_count, 0);
+        assert_eq!(actual.receipt_count, 0);
+    }
+
+    #[test]
+    fn summarize_counts_null_session_receipt_but_not_session() {
+        let db = open_db();
+        let item_session = make_session_with_cwd(&db, "claude", "/summary-null-item-session");
+        let receipt = ReceiptRepository::new(db.clone())
+            .upsert_by_cwd_date(None, "/summary-null-receipt", 1_767_225_600)
+            .unwrap();
+        insert_raw_item(&db, receipt.id, item_session.id, "summary-t3", 10, 15, 0.10);
+
+        let actual = SummaryRepository::new(db)
+            .summarize("2026-01-01", "2026-01-31")
+            .unwrap();
+
+        assert_eq!(actual.receipt_count, 1);
+        assert_eq!(actual.session_count, 0);
+        assert_eq!(actual.total_tokens, 25);
+        assert!((actual.total_cost - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn summarize_excludes_receipts_without_items() {
+        let db = open_db();
+        let session = make_session_with_cwd(&db, "claude", "/summary-no-items");
+        ReceiptRepository::new(db.clone())
+            .upsert_by_cwd_date(Some(session.id), "/summary-no-items", 1_767_225_600)
+            .unwrap();
+
+        let actual = SummaryRepository::new(db)
+            .summarize("2026-01-01", "2026-01-31")
+            .unwrap();
+
+        assert_eq!(actual.receipt_count, 0);
+        assert_eq!(actual.session_count, 0);
+        assert_eq!(actual.total_tokens, 0);
+        assert_eq!(actual.total_cost, 0.0);
+    }
+
+    #[test]
+    fn summarize_includes_start_and_end_boundaries() {
+        let db = open_db();
+        let session = make_session_with_cwd(&db, "claude", "/summary-boundary");
+        merge_item(&db, session.id, make_draft("summary-t5-start", 1_767_225_600, 1, 2, 0.10)).unwrap();
+        merge_item(&db, session.id, make_draft("summary-t5-end", 1_769_817_600, 3, 4, 0.20)).unwrap();
+        merge_item(&db, session.id, make_draft("summary-t5-before", 1_767_139_200, 10, 10, 1.00)).unwrap();
+        merge_item(&db, session.id, make_draft("summary-t5-after", 1_769_904_000, 10, 10, 1.00)).unwrap();
+
+        let actual = SummaryRepository::new(db)
+            .summarize("2026-01-01", "2026-01-31")
+            .unwrap();
+
+        assert_eq!(actual.receipt_count, 2);
+        assert_eq!(actual.session_count, 1);
+        assert_eq!(actual.total_tokens, 10);
+        assert!((actual.total_cost - 0.30).abs() < 1e-9);
     }
 }

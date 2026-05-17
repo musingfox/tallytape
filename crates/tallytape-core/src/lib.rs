@@ -1,6 +1,9 @@
 mod aggregation;
 pub use aggregation::{AggregationBucket, AggregationRepository, ModelBreakdown};
 
+mod summary;
+pub use summary::{RangeSummary, SummaryRepository};
+
 mod db;
 pub use db::Database;
 

@@ -59,6 +59,14 @@ export interface ModelBreakdownDto {
 }
 
 /** Rust source: src-tauri/src/lib.rs:72 */
+export interface RangeSummaryDto {
+  totalCost: number;
+  totalTokens: number;
+  sessionCount: number;
+  receiptCount: number;
+}
+
+/** Rust source: src-tauri/src/lib.rs:87 */
 export interface AggregationBucketDto {
   bucket: string;
   receiptCount: number;

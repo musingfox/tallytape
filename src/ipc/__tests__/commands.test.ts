@@ -2,11 +2,12 @@ import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   getAggregation,
   getReceipt,
+  getSummary,
   listItemsByReceipt,
   listReceiptSummaries,
   listReceipts,
 } from '../commands';
-import type { AggregationBucketDto, ItemDto, ReceiptDto, ReceiptSummaryDto } from '../types';
+import type { AggregationBucketDto, ItemDto, RangeSummaryDto, ReceiptDto, ReceiptSummaryDto } from '../types';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -71,6 +72,13 @@ const aggregation1: AggregationBucketDto = {
   totalCost: 0.01,
   totalTokens: 100,
   modelBreakdown: [{ model: 'gpt-4', count: 1, cost: 0.01, tokens: 100 }],
+};
+
+const rangeSummary1: RangeSummaryDto = {
+  totalCost: 1.5,
+  totalTokens: 1000,
+  sessionCount: 2,
+  receiptCount: 4,
 };
 
 beforeEach(() => {
@@ -148,6 +156,16 @@ describe('IPC command wrappers', () => {
 
       await expect(listReceiptSummaries()).resolves.toEqual([summary1]);
       expect(mockedInvoke).toHaveBeenCalledWith('list_receipt_summaries');
+    });
+  });
+
+  describe('getSummary', () => {
+    it('calls get_summary with dateRange and returns the summary', async () => {
+      const dateRange = { startDate: '2026-01-01', endDate: '2026-01-31' };
+      mockedInvoke.mockResolvedValueOnce(rangeSummary1);
+
+      await expect(getSummary(dateRange)).resolves.toEqual(rangeSummary1);
+      expect(mockedInvoke).toHaveBeenCalledWith('get_summary', { dateRange });
     });
   });
 

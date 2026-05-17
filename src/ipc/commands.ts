@@ -5,6 +5,7 @@ import type {
   DateRange,
   Granularity,
   ItemDto,
+  RangeSummaryDto,
   ReceiptDto,
   ReceiptSummaryDto,
 } from './types';
@@ -50,6 +51,14 @@ export function getAggregation(
   dateRange: DateRange,
 ): Promise<AggregationBucketDto[]> {
   return invoke<AggregationBucketDto[]>('get_aggregation', { granularity, dateRange });
+}
+
+/**
+ * Rust command source: src-tauri/src/lib.rs:get_summary.
+ * Rejected promises carry an AppError-shaped payload ({ message: string }).
+ */
+export function getSummary(dateRange: DateRange): Promise<RangeSummaryDto> {
+  return invoke<RangeSummaryDto>('get_summary', { dateRange });
 }
 
 export type { AppError };

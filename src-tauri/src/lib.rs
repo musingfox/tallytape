@@ -9,7 +9,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tallytape_core::{
     db_path, AggregationBucket, AggregationRepository, Database, Item, ItemRepository,
-    ModelBreakdown, Receipt, ReceiptRepository, ReceiptSummary,
+    ModelBreakdown, RangeSummary, Receipt, ReceiptRepository, ReceiptSummary, SummaryRepository,
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -76,6 +76,26 @@ pub struct AggregationBucketDto {
     pub total_cost: f64,
     pub total_tokens: i64,
     pub model_breakdown: Vec<ModelBreakdownDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RangeSummaryDto {
+    pub total_cost: f64,
+    pub total_tokens: i64,
+    pub session_count: i64,
+    pub receipt_count: i64,
+}
+
+impl From<RangeSummary> for RangeSummaryDto {
+    fn from(summary: RangeSummary) -> Self {
+        Self {
+            total_cost: summary.total_cost,
+            total_tokens: summary.total_tokens,
+            session_count: summary.session_count,
+            receipt_count: summary.receipt_count,
+        }
+    }
 }
 
 impl From<AggregationBucket> for AggregationBucketDto {
@@ -271,6 +291,12 @@ impl AppBackend {
         Ok(buckets.into_iter().map(Into::into).collect())
     }
 
+    pub fn get_summary(&self, range: DateRange) -> anyhow::Result<RangeSummaryDto> {
+        SummaryRepository::new(self.db.clone())
+            .summarize(&range.start_date, &range.end_date)
+            .map(Into::into)
+    }
+
     pub fn refresh_receipt_snapshot(&self) -> anyhow::Result<()> {
         let snapshot = self.current_receipt_snapshot()?;
         *self
@@ -406,6 +432,11 @@ fn get_aggregation(
         .map_err(app_error)
 }
 
+#[tauri::command]
+fn get_summary(state: State<'_, AppState>, date_range: DateRange) -> AppResult<RangeSummaryDto> {
+    state.backend.get_summary(date_range).map_err(app_error)
+}
+
 fn app_error(error: anyhow::Error) -> AppError {
     error.into()
 }
@@ -532,7 +563,8 @@ pub fn run() {
             get_receipt,
             list_items_by_receipt,
             list_receipt_summaries,
-            get_aggregation
+            get_aggregation,
+            get_summary
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1646,6 +1678,77 @@ mod tests {
         assert!(breakdown.contains_key("count"));
         assert!(breakdown.contains_key("cost"));
         assert!(breakdown.contains_key("tokens"));
+    }
+
+    #[test]
+    fn get_summary_serializes_camel_case_wire_shape() {
+        let (_dir, backend) = test_backend();
+        let receipt = insert_receipt(backend.database(), "/summary-dto", 1_778_976_000);
+        let session = backend
+            .get_receipt(receipt)
+            .unwrap()
+            .unwrap()
+            .session_id
+            .unwrap();
+        tallytape_core::ItemRepository::new(backend.database().clone())
+            .insert(&NewItem {
+                receipt_id: receipt,
+                session_id: session,
+                source: "test".to_string(),
+                request_id: "summary-dto".to_string(),
+                message_id: None,
+                parent_uuid: None,
+                is_sidechain: false,
+                occurred_at: 1_778_976_000,
+                model: "gpt-4".to_string(),
+                service_tier: None,
+                input_tokens: 40,
+                output_tokens: 60,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                cost: 0.25,
+                metadata: None,
+            })
+            .unwrap();
+
+        let result = backend
+            .get_summary(DateRange {
+                start_date: "2026-05-17".to_string(),
+                end_date: "2026-05-17".to_string(),
+            })
+            .unwrap();
+        let value = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(value["totalCost"], 0.25);
+        assert_eq!(value["totalTokens"], 100);
+        assert_eq!(value["sessionCount"], 1);
+        assert_eq!(value["receiptCount"], 1);
+        assert!(value.get("total_cost").is_none());
+        assert!(value.get("total_tokens").is_none());
+        assert!(value.get("session_count").is_none());
+        assert!(value.get("receipt_count").is_none());
+    }
+
+    #[test]
+    fn get_summary_empty_range_returns_zero_dto() {
+        let (_dir, backend) = test_backend();
+
+        let result = backend
+            .get_summary(DateRange {
+                start_date: "2030-01-01".to_string(),
+                end_date: "2030-01-31".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            result,
+            RangeSummaryDto {
+                total_cost: 0.0,
+                total_tokens: 0,
+                session_count: 0,
+                receipt_count: 0,
+            }
+        );
     }
 
     // C7: Real-notify smoke test (ignored — non-deterministic on macOS FSEvents)
