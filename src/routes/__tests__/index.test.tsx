@@ -179,20 +179,22 @@ describe("ReceiptTable", () => {
 
     renderIndex();
 
-    await waitFor(() => expect(screen.getByText("0.35")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("$0.35")).toBeInTheDocument());
     expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "list_receipt_summaries")).toHaveLength(1);
     expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "list_items_by_receipt")).toHaveLength(0);
 
     const row1Cells = within(screen.getByText("summary-1").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
-    expect(row1Cells[2]).toHaveTextContent("0.35");
+    expect(row1Cells[2]).toHaveTextContent("$0.35");
+    expect(row1Cells[2].getAttribute("aria-label")).toBe("Total cost $0.35");
     expect(row1Cells[3]).toHaveTextContent("2");
 
     const row2Cells = within(screen.getByText("summary-2").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
-    expect(row2Cells[2]).toHaveTextContent("1");
+    expect(row2Cells[2]).toHaveTextContent("$1.00");
     expect(row2Cells[3]).toHaveTextContent("1");
 
     const row3Cells = within(screen.getByText("summary-3").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
-    expect(row3Cells[2]).toHaveTextContent("0");
+    expect(row3Cells[2]).toHaveTextContent("$0.00");
+    expect(row3Cells[2].getAttribute("aria-label")).toBe("Total cost $0.00");
     expect(row3Cells[3]).toHaveTextContent("0");
   });
 
@@ -237,7 +239,7 @@ describe("ReceiptTable", () => {
     await waitFor(() => {
       const row = screen.getByText("stale-c").closest("tr") as HTMLTableRowElement;
       const cells = within(row).getAllByRole("cell");
-      expect(cells[2]).toHaveTextContent("9");
+      expect(cells[2]).toHaveTextContent("$9.00");
       expect(cells[3]).toHaveTextContent("9");
     });
     expect(screen.queryByText("1")).toBeNull();
@@ -258,10 +260,10 @@ describe("ReceiptTable", () => {
 
     renderIndex();
 
-    await waitFor(() => expect(screen.getByText("4")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("$4.00")).toBeInTheDocument());
 
     const okCells = within(screen.getByText("summary-ok").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
-    expect(okCells[2]).toHaveTextContent("4");
+    expect(okCells[2]).toHaveTextContent("$4.00");
     expect(okCells[3]).toHaveTextContent("1");
 
     const failCells = within(screen.getByText("summary-fail").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
@@ -386,7 +388,7 @@ describe("ReceiptTable", () => {
       return [];
     });
     renderIndex();
-    await waitFor(() => expect(screen.getByText("0.35")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("$0.35")).toBeInTheDocument());
     const twoCells = within(screen.getByText("/two").closest("tr") as HTMLTableRowElement).getAllByRole("cell");
     expect(twoCells[2].getAttribute("aria-label")).toBe("Total cost $0.35");
     expect(twoCells[3].getAttribute("aria-label")).toBe("2 items");
@@ -401,6 +403,7 @@ describe("ReceiptTable", () => {
     const row = (await screen.findByText("/p")).closest("tr") as HTMLTableRowElement;
     await waitFor(() => {
       const cells = within(row).getAllByRole("cell");
+      expect(cells[2]).toHaveTextContent("—");
       expect(cells[2].getAttribute("aria-label")).toBe("Pending");
       expect(cells[3].getAttribute("aria-label")).toBe("Pending");
     });

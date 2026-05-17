@@ -186,7 +186,7 @@ export function ReceiptTable() {
                 <td className="px-4 py-2">{receipt.date}</td>
                 <td className="px-4 py-2">{receipt.cwd}</td>
                 <td className="px-4 py-2" aria-label={summary !== undefined ? `Total cost ${formatCost(summary.totalCost)}` : "Pending"}>
-                  {summary?.totalCost ?? "—"}
+                  {summary !== undefined ? formatCost(summary.totalCost) : "—"}
                 </td>
                 <td
                   className="px-4 py-2"
