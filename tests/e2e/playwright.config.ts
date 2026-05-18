@@ -5,9 +5,9 @@ const testDir = defineBddConfig({
   features: "../features/*.feature",
   steps: "steps/*.ts",
   featuresRoot: "..",
-  // The UI side binds both @dual (shared with the Rust API runner) and
-  // @ui-only (presentation/animation flows that only make sense in the DOM).
-  tags: "@dual or @ui-only",
+  // E2E runs the @dual happy-path + critical flows. Presentation details live
+  // in component tests, not here.
+  tags: "@dual",
 });
 
 export default defineConfig({

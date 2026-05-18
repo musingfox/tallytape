@@ -1,8 +1,9 @@
 //! BDD step bindings for `tests/features/p6-1-drawer.feature` (API layer).
 //!
 //! Runs the `@dual` scenarios against `AppBackend` directly — the same code
-//! path used by the Tauri IPC handlers and the file watcher. UI-only steps
-//! (`@ui-only`) are filtered out here and live on the playwright-bdd side.
+//! path used by the Tauri IPC handlers and the file watcher. The feature file
+//! deliberately scopes itself to happy-path + critical flows; presentation
+//! details live in `src/components/__tests__/ReceiptDrawer.test.tsx`.
 
 use cucumber::{gherkin::Step, given, then, when, World};
 use tallytape_app_lib::{AppBackend, ReceiptChange};
@@ -69,11 +70,6 @@ async fn seed_from_table(world: &mut DrawerWorld, step: &Step) {
     }
 }
 
-#[given("I have not run any Claude Code sessions yet")]
-async fn no_sessions(_world: &mut DrawerWorld) {
-    // Background already provisioned an empty data directory.
-}
-
 #[given(regex = r"^the dashboard is showing my (\d+) most recent receipts$")]
 async fn dashboard_showing_n(world: &mut DrawerWorld, n: usize) {
     for i in 0..n {
@@ -120,16 +116,6 @@ async fn see_n_receipts(world: &mut DrawerWorld, n: usize) {
         .expect("list receipts")
         .len();
     assert_eq!(got, n, "expected {n} receipts, got {got}");
-}
-
-#[then("I see no receipts")]
-async fn see_no_receipts(world: &mut DrawerWorld) {
-    let got = world
-        .backend()
-        .list_receipts(None)
-        .expect("list receipts")
-        .len();
-    assert_eq!(got, 0, "expected 0 receipts, got {got}");
 }
 
 #[then(regex = r"^I now see (\d+) receipts in total$")]

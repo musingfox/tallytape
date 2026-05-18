@@ -22,12 +22,8 @@ Given(
   },
 );
 
-Given("I have not run any Claude Code sessions yet", async ({ fakeDb }) => {
-  void fakeDb;
-});
-
 Given(
-  /^the dashboard is showing (?:my )?(\d+)(?: most recent)? receipts$/,
+  /^the dashboard is showing my (\d+) most recent receipts$/,
   async ({ fakeDb, page }, n: number) => {
     for (let i = 0; i < n; i++) {
       fakeDb.insertReceipt(
@@ -76,12 +72,6 @@ Then(/^I see (\d+) receipts$/, async ({ page }, n: number) => {
   await expect(page.locator("#receipt-drawer-panel tbody tr")).toHaveCount(n);
 });
 
-Then("I see no receipts", async ({ page }) => {
-  // The drawer renders an empty-state <p> instead of a <table> when the store
-  // has zero receipts — both signals confirm the surface is empty.
-  await expect(page.locator("#receipt-drawer-panel tbody tr")).toHaveCount(0);
-});
-
 Then(/^I now see (\d+) receipts in total$/, async ({ page }, n: number) => {
   await expect(page.locator("#receipt-drawer-panel tbody tr")).toHaveCount(n);
 });
@@ -107,69 +97,5 @@ Then(
       { hasText: cwd! },
     );
     await expect(row).toHaveCount(1);
-  },
-);
-
-// ---------------------------------------------------------------------------
-// @ui-only steps — empty surface message
-// ---------------------------------------------------------------------------
-
-Then("an empty-state message invites me to start", async ({ page }) => {
-  await expect(
-    page.getByText("No receipts yet — start a session to print your first tape."),
-  ).toBeVisible();
-});
-
-// ---------------------------------------------------------------------------
-// @ui-only steps — pending marker fades after entry animation settles
-// ---------------------------------------------------------------------------
-
-When("I wait for the entry animation to settle", async ({ page }) => {
-  // The framer-motion layout transition fires onAnimationComplete, which the
-  // store consumes via clearPendingArrivals. We just need to wait until the
-  // pending attribute has been turned off.
-  await expect(
-    page.locator(`#receipt-drawer-panel tbody tr[data-pending="true"]`),
-  ).toHaveCount(0, { timeout: 5_000 });
-});
-
-Then("no receipt is highlighted as new", async ({ page }) => {
-  await expect(
-    page.locator(`#receipt-drawer-panel tbody tr[data-pending="true"]`),
-  ).toHaveCount(0);
-});
-
-// ---------------------------------------------------------------------------
-// @ui-only steps — drawer collapse / expand
-// ---------------------------------------------------------------------------
-
-When("I collapse the receipt drawer", async ({ page }) => {
-  await page.getByRole("button", { name: "Recent Receipts" }).click();
-});
-
-When("I re-open the receipt drawer", async ({ page }) => {
-  await page.getByRole("button", { name: "Recent Receipts" }).click();
-});
-
-Then("the receipt list is hidden", async ({ page }) => {
-  await expect(
-    page.getByRole("button", { name: "Recent Receipts" }),
-  ).toHaveAttribute("aria-expanded", "false");
-  await expect(page.locator("#receipt-drawer-panel table")).toHaveCount(0);
-});
-
-Then("the receipt list is visible again", async ({ page }) => {
-  await expect(
-    page.getByRole("button", { name: "Recent Receipts" }),
-  ).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator("#receipt-drawer-panel table")).toBeVisible();
-});
-
-Then(
-  "the drawer header remains so I can re-open it",
-  async ({ page }) => {
-    await expect(
-      page.getByRole("button", { name: "Recent Receipts" }),
-    ).toBeVisible();
   },
 );

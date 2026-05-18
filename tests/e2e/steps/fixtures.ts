@@ -1,22 +1,27 @@
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test as base, createBdd } from "playwright-bdd";
 
-const MIGRATION_FILES = [
-  "0001_initial.sql",
-  "0002_receipts_updated_at_trigger.sql",
-  "0003_receipts_cwd_date.sql",
-] as const;
+const MIGRATIONS_DIR = "crates/tallytape-core/migrations";
+
+// Migrations are the authoritative schema (CLAUDE.md §8). Reading them from
+// disk in numeric order keeps the BDD fake DB in lockstep with whatever the
+// real app would apply — never hand-list filenames.
+function loadMigrationsInOrder(): string[] {
+  return readdirSync(MIGRATIONS_DIR)
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+}
 
 function openFakeDb(): { db: Database; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), "tt-e2e-"));
   const db = new Database(join(dir, "tallytape.sqlite"));
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
-  for (const file of MIGRATION_FILES) {
-    db.exec(readFileSync(join("crates/tallytape-core/migrations", file), "utf8"));
+  for (const file of loadMigrationsInOrder()) {
+    db.exec(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
   }
   return { db, dir };
 }

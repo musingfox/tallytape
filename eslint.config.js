@@ -45,7 +45,6 @@ export default tseslint.config(
       globals: { ...globals.node, ...globals.browser },
     },
     rules: {
-      "@typescript-eslint/no-explicit-any": "off",
       // playwright-bdd's fixture API uses `use(...)` to yield the fixture
       // value — `react-hooks/rules-of-hooks` cannot tell that apart from the
       // React `use` hook, so silence the false positives in this directory.
