@@ -13,6 +13,7 @@ export default tseslint.config(
       "src-tauri/gen",
       "node_modules",
       "src/routeTree.gen.ts",
+      "tests/e2e/.features-gen/**",
     ],
   },
   ...tseslint.configs.recommended,
@@ -36,6 +37,19 @@ export default tseslint.config(
     files: ["src/routes/**/*.{ts,tsx}"],
     rules: {
       "react-refresh/only-export-components": "off",
+    },
+  },
+  {
+    files: ["tests/e2e/**/*.ts"],
+    languageOptions: {
+      globals: { ...globals.node, ...globals.browser },
+    },
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+      // playwright-bdd's fixture API uses `use(...)` to yield the fixture
+      // value — `react-hooks/rules-of-hooks` cannot tell that apart from the
+      // React `use` hook, so silence the false positives in this directory.
+      "react-hooks/rules-of-hooks": "off",
     },
   },
   {

@@ -14,19 +14,23 @@
     "test:watch": "vitest",
     "coverage:rust:branch": "cargo +nightly llvm-cov --workspace --branch --summary-only --json --quiet > target/llvm-cov-branch-summary.json && python3 scripts/check-rust-branch-coverage.py --min 65 target/llvm-cov-branch-summary.json",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "seed:fake": "bun run scripts/seed-fake-receipts.ts",
+    "e2e": "bun --bun bddgen test -c tests/e2e/playwright.config.ts && bun --bun playwright test -c tests/e2e/playwright.config.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.4",
     "@tanstack/react-router": "^1.169.1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "framer-motion": "^12.38.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwindcss": "^4.2.4",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@tanstack/router-devtools": "^1.166.13",
     "@tanstack/router-plugin": "^1.167.32",
     "@tauri-apps/cli": "^2",
@@ -43,6 +47,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
     "jsdom": "^29.1.1",
+    "playwright-bdd": "^8.5.1",
     "prettier": "^3.8.3",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.59.1",

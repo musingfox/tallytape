@@ -81,7 +81,9 @@ describe("dashboard route", () => {
 
     const summaryCall = vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "get_summary");
     const aggregationCall = vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "get_aggregation");
-    expect(summaryCall?.[1]?.dateRange).toEqual(aggregationCall?.[1]?.dateRange);
+    const summaryArgs = summaryCall?.[1] as { dateRange?: unknown } | undefined;
+    const aggregationArgs = aggregationCall?.[1] as { dateRange?: unknown } | undefined;
+    expect(summaryArgs?.dateRange).toEqual(aggregationArgs?.dateRange);
   });
 
   it("updates dashboard requests and active preset when Today is clicked", async () => {

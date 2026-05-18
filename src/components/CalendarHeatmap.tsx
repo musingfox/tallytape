@@ -28,7 +28,7 @@ function parseISODate(value: string): Date {
   return new Date(year, month - 1, day);
 }
 
-export function iterateDates(start: string, end: string): string[] {
+function iterateDates(start: string, end: string): string[] {
   const dates: string[] = [];
   const current = parseISODate(start);
   const last = parseISODate(end);
@@ -41,7 +41,7 @@ export function iterateDates(start: string, end: string): string[] {
   return dates;
 }
 
-export function bucketFor(cost: number): HeatBucket {
+function bucketFor(cost: number): HeatBucket {
   if (Number.isFinite(cost)) {
     if (cost > 10) return 4;
     if (cost > 2) return 3;
@@ -51,40 +51,56 @@ export function bucketFor(cost: number): HeatBucket {
   return 0;
 }
 
+interface HeatmapResultState {
+  key: string;
+  status: LoadStatus;
+  data: AggregationBucketDto[];
+  error: Error | null;
+}
+
+const INITIAL_HEATMAP_RESULT: HeatmapResultState = {
+  key: "",
+  status: "loading",
+  data: [],
+  error: null,
+};
+
 export function CalendarHeatmap({ start, end, metric = "totalCost", onSelectDate, selectedDate }: CalendarHeatmapProps) {
-  const [status, setStatus] = useState<LoadStatus>("loading");
-  const [data, setData] = useState<AggregationBucketDto[]>([]);
-  const [error, setError] = useState<Error | null>(null);
   const [retryToken, setRetryToken] = useState(0);
+  const [result, setResult] = useState<HeatmapResultState>(INITIAL_HEATMAP_RESULT);
   const [focusIndex, setFocusIndex] = useState(0);
   const buttonsRef = useRef<Array<HTMLButtonElement | null>>([]);
 
   const dates = useMemo(() => iterateDates(start, end), [start, end]);
   const leadingSpacers = useMemo(() => parseISODate(start).getDay(), [start]);
+
+  const requestKey = `${start}|${end}|${metric}|${retryToken}`;
+  // See DashboardCards for why loading is derived from request-key mismatch
+  // rather than set synchronously inside the effect.
+  const status: LoadStatus = result.key === requestKey ? result.status : "loading";
+  const data = result.key === requestKey ? result.data : INITIAL_HEATMAP_RESULT.data;
+  const error = result.key === requestKey ? result.error : null;
+
   const buckets = useMemo(() => new Map(data.map((bucket) => [bucket.bucket, bucket])), [data]);
 
   useEffect(() => {
     let cancelled = false;
-    setStatus("loading");
-    setError(null);
-
     void getAggregation("daily", { startDate: start, endDate: end })
-      .then((result) => {
+      .then((fetched) => {
         if (cancelled) return;
-        setData(result);
-        setStatus("ready");
+        setResult({ key: requestKey, status: "ready", data: fetched, error: null });
         setFocusIndex(0);
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
-        setError(caught instanceof Error ? caught : new Error(String(caught || "Failed to load heatmap")));
-        setStatus("error");
+        const err = caught instanceof Error ? caught : new Error(String(caught || "Failed to load heatmap"));
+        setResult({ key: requestKey, status: "error", data: [], error: err });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [start, end, metric, retryToken]);
+  }, [start, end, requestKey]);
 
   const moveFocus = (index: number) => {
     const next = Math.max(0, Math.min(index, dates.length - 1));

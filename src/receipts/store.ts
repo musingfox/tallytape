@@ -24,6 +24,7 @@ interface ReceiptState {
   updateReceipt: (r: Receipt) => void;
   selectReceipt: (id: number | null) => void;
   clearPendingArrivals: () => void;
+  dismissPendingArrival: (id: number) => void;
   setLoadStatus: (status: ReceiptLoadStatus, error?: string | null) => void;
   pushError: (message: string) => string;
   dismissError: (id: string) => void;
@@ -87,6 +88,12 @@ export const useReceiptStore = create<ReceiptState>()(
 
       clearPendingArrivals() {
         set({ pendingArrivals: [] });
+      },
+
+      dismissPendingArrival(id: number) {
+        set((state) => ({
+          pendingArrivals: state.pendingArrivals.filter((arrival) => arrival.id !== id),
+        }));
       },
 
       setLoadStatus(status: ReceiptLoadStatus, error: string | null = null) {

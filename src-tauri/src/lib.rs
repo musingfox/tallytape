@@ -1772,7 +1772,7 @@ mod tests {
         loop {
             {
                 let recorded = stub.events.lock().unwrap();
-                if recorded.len() >= 1 {
+                if !recorded.is_empty() {
                     assert_eq!(recorded[0].0, "receipt-added");
                     break;
                 }

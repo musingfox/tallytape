@@ -62,7 +62,11 @@ beforeEach(() => {
   });
 });
 
-describe("ReceiptTable", () => {
+// These tests exercise the "/" Index route, which renders <ReceiptDrawer />.
+// They live here (not in ReceiptDrawer.test.tsx) because they verify the route
+// shell — date-filter wiring, load lifecycle, error banner — going through the
+// router rather than the drawer in isolation.
+describe("Index route (renders ReceiptDrawer)", () => {
   it("renders a four-column table with one row per receipt", async () => {
     seedReceipts([
       receipt({ id: 1, cwd: "/a", date: "2026-05-15" }),

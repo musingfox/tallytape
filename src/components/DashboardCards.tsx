@@ -26,35 +26,46 @@ function Card({ label, value }: { label: string; value: string }) {
   );
 }
 
+interface ResultState {
+  key: string;
+  status: Status;
+  data: RangeSummaryDto | null;
+  error: string | null;
+}
+
+const INITIAL_RESULT: ResultState = { key: "", status: "loading", data: null, error: null };
+
 export function DashboardCards({ startDate, endDate }: DashboardCardsProps) {
-  const [status, setStatus] = useState<Status>("loading");
-  const [data, setData] = useState<RangeSummaryDto | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState(0);
+  const [result, setResult] = useState<ResultState>(INITIAL_RESULT);
 
   const dateRange = useMemo(() => ({ startDate, endDate }), [startDate, endDate]);
+  const requestKey = `${startDate}|${endDate}|${retryToken}`;
+
+  // Loading is derived from request-key mismatch — when the in-flight request
+  // is for a key the result hasn't caught up to yet, the cards revert to the
+  // skeleton without us having to synchronously setStatus("loading") inside
+  // the effect (which trips react-hooks/set-state-in-effect).
+  const status: Status = result.key === requestKey ? result.status : "loading";
+  const data = result.key === requestKey ? result.data : null;
+  const error = result.key === requestKey ? result.error : null;
 
   useEffect(() => {
     let cancelled = false;
-    setStatus("loading");
-    setError(null);
-
     void getSummary(dateRange)
       .then((summary) => {
         if (cancelled) return;
-        setData(summary);
-        setStatus("ready");
+        setResult({ key: requestKey, status: "ready", data: summary, error: null });
       })
       .catch((caught: unknown) => {
         if (cancelled) return;
-        setError(errorMessage(caught));
-        setStatus("error");
+        setResult({ key: requestKey, status: "error", data: null, error: errorMessage(caught) });
       });
 
     return () => {
       cancelled = true;
     };
-  }, [dateRange, retryToken]);
+  }, [dateRange, requestKey]);
 
   const retry = useCallback(() => setRetryToken((current) => current + 1), []);
 

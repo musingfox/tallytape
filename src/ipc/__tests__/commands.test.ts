@@ -209,7 +209,9 @@ describe('IPC command wrappers', () => {
         message: 'unknown variant "quarterly", expected one of "daily", "weekly", "monthly"',
       });
 
-      await expect(getAggregation('quarterly' as any, dateRange)).rejects.toMatchObject({
+      await expect(
+        getAggregation('quarterly' as unknown as Parameters<typeof getAggregation>[0], dateRange),
+      ).rejects.toMatchObject({
         message: expect.stringContaining('quarterly'),
       });
     });

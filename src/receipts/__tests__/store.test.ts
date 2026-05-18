@@ -137,6 +137,24 @@ describe('receipt store actions', () => {
     expect(useReceiptStore.getState().pendingArrivals).toEqual([]);
   });
 
+  it('dismissPendingArrival removes only the matching id', () => {
+    useReceiptStore.getState().addReceipt(r1);
+    useReceiptStore.getState().addReceipt(r2);
+
+    useReceiptStore.getState().dismissPendingArrival(r1.id);
+
+    expect(useReceiptStore.getState().pendingArrivals.map((a) => a.id)).toEqual([r2.id]);
+    expect(useReceiptStore.getState().receipts.size).toBe(2);
+  });
+
+  it('dismissPendingArrival is a no-op for an id not in the queue', () => {
+    useReceiptStore.getState().addReceipt(r1);
+
+    useReceiptStore.getState().dismissPendingArrival(9999);
+
+    expect(useReceiptStore.getState().pendingArrivals.map((a) => a.id)).toEqual([r1.id]);
+  });
+
   it('setLoadStatus records status and error text', () => {
     useReceiptStore.getState().setLoadStatus('error', 'db locked');
 
