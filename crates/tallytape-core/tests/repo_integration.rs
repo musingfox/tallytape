@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use tallytape_core::{
-    merge_item, Database, ItemRepository, NewItem, NewItemDraft, NewSession, ReceiptRepository,
-    SessionRepository, SummaryRepository,
+    merge_item, AppSettingsRepository, Database, ItemRepository, NewItem, NewItemDraft, NewSession,
+    ReceiptRepository, SessionRepository, SummaryRepository,
 };
 
 // ---------------------------------------------------------------------------
@@ -790,38 +790,39 @@ mod aggregation {
         .unwrap()
     }
 
-    fn custom_item(
-        db: &Database,
+    struct CustomItem<'a> {
         session_id: i64,
-        cwd: &str,
+        cwd: &'a str,
         ts: i64,
-        model: &str,
+        model: &'a str,
         input_tokens: i64,
         output_tokens: i64,
         cost: f64,
         cache_read_tokens: Option<i64>,
         cache_creation_tokens: Option<i64>,
-    ) {
+    }
+
+    fn custom_item(db: &Database, args: CustomItem<'_>) {
         let receipt = ReceiptRepository::new(db.clone())
-            .upsert_by_cwd_date(Some(session_id), cwd, ts)
+            .upsert_by_cwd_date(Some(args.session_id), args.cwd, args.ts)
             .expect("upsert receipt");
         ItemRepository::new(db.clone())
             .insert(&NewItem {
                 receipt_id: receipt.id,
-                session_id,
+                session_id: args.session_id,
                 source: "claude".to_string(),
                 request_id: format!("req-agg-{}", next_id()),
                 message_id: None,
                 parent_uuid: None,
                 is_sidechain: false,
-                occurred_at: ts,
-                model: model.to_string(),
+                occurred_at: args.ts,
+                model: args.model.to_string(),
                 service_tier: None,
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                cache_creation_tokens,
-                cost,
+                input_tokens: args.input_tokens,
+                output_tokens: args.output_tokens,
+                cache_read_tokens: args.cache_read_tokens,
+                cache_creation_tokens: args.cache_creation_tokens,
+                cost: args.cost,
                 metadata: None,
             })
             .expect("insert item");
@@ -844,19 +845,32 @@ mod aggregation {
         let d = date_for(&db, ts);
         let session = make_session_with_cwd(&db, "claude", "/agg-t1");
         custom_item(
-            &db, session.id, "/agg-t1", ts, "opus", 10, 20, 0.10, None, None,
+            &db,
+            CustomItem {
+                session_id: session.id,
+                cwd: "/agg-t1",
+                ts,
+                model: "opus",
+                input_tokens: 10,
+                output_tokens: 20,
+                cost: 0.10,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
         );
         custom_item(
             &db,
-            session.id,
-            "/agg-t1",
-            ts + 60,
-            "haiku",
-            5,
-            7,
-            0.01,
-            None,
-            None,
+            CustomItem {
+                session_id: session.id,
+                cwd: "/agg-t1",
+                ts: ts + 60,
+                model: "haiku",
+                input_tokens: 5,
+                output_tokens: 7,
+                cost: 0.01,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
         );
 
         let actual = AggregationRepository::new(db)
@@ -895,15 +909,17 @@ mod aggregation {
         let session = make_session_with_cwd(&db, "claude", "/agg-t2");
         custom_item(
             &db,
-            session.id,
-            "/agg-t2",
-            ts,
-            "opus",
-            10,
-            20,
-            0.10,
-            Some(1000),
-            Some(500),
+            CustomItem {
+                session_id: session.id,
+                cwd: "/agg-t2",
+                ts,
+                model: "opus",
+                input_tokens: 10,
+                output_tokens: 20,
+                cost: 0.10,
+                cache_read_tokens: Some(1000),
+                cache_creation_tokens: Some(500),
+            },
         );
 
         let actual = AggregationRepository::new(db)
@@ -1114,31 +1130,46 @@ mod aggregation {
         let d = date_for(&db, ts);
         let session = make_session_with_cwd(&db, "claude", "/agg-t13");
         custom_item(
-            &db, session.id, "/agg-t13", ts, "zeta-1", 1, 1, 0.01, None, None,
+            &db,
+            CustomItem {
+                session_id: session.id,
+                cwd: "/agg-t13",
+                ts,
+                model: "zeta-1",
+                input_tokens: 1,
+                output_tokens: 1,
+                cost: 0.01,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
         );
         custom_item(
             &db,
-            session.id,
-            "/agg-t13",
-            ts + 1,
-            "alpha-1",
-            1,
-            1,
-            0.01,
-            None,
-            None,
+            CustomItem {
+                session_id: session.id,
+                cwd: "/agg-t13",
+                ts: ts + 1,
+                model: "alpha-1",
+                input_tokens: 1,
+                output_tokens: 1,
+                cost: 0.01,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
         );
         custom_item(
             &db,
-            session.id,
-            "/agg-t13",
-            ts + 2,
-            "middle",
-            1,
-            1,
-            0.01,
-            None,
-            None,
+            CustomItem {
+                session_id: session.id,
+                cwd: "/agg-t13",
+                ts: ts + 2,
+                model: "middle",
+                input_tokens: 1,
+                output_tokens: 1,
+                cost: 0.01,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+            },
         );
 
         let actual = AggregationRepository::new(db)
@@ -1225,10 +1256,30 @@ mod summary {
         let s1 = make_session_with_cwd(&db, "claude", "/summary-a");
         let s2 = make_session_with_cwd(&db, "claude", "/summary-b");
 
-        merge_item(&db, s1.id, make_draft("summary-t1-a", 1_767_225_600, 100, 100, 0.25)).unwrap();
-        merge_item(&db, s1.id, make_draft("summary-t1-b", 1_767_312_000, 100, 200, 0.25)).unwrap();
-        merge_item(&db, s2.id, make_draft("summary-t1-c", 1_768_435_200, 100, 100, 0.50)).unwrap();
-        merge_item(&db, s2.id, make_draft("summary-t1-d", 1_769_817_600, 200, 100, 0.50)).unwrap();
+        merge_item(
+            &db,
+            s1.id,
+            make_draft("summary-t1-a", 1_767_225_600, 100, 100, 0.25),
+        )
+        .unwrap();
+        merge_item(
+            &db,
+            s1.id,
+            make_draft("summary-t1-b", 1_767_312_000, 100, 200, 0.25),
+        )
+        .unwrap();
+        merge_item(
+            &db,
+            s2.id,
+            make_draft("summary-t1-c", 1_768_435_200, 100, 100, 0.50),
+        )
+        .unwrap();
+        merge_item(
+            &db,
+            s2.id,
+            make_draft("summary-t1-d", 1_769_817_600, 200, 100, 0.50),
+        )
+        .unwrap();
 
         let actual = SummaryRepository::new(db)
             .summarize("2026-01-01", "2026-01-31")
@@ -1295,10 +1346,30 @@ mod summary {
     fn summarize_includes_start_and_end_boundaries() {
         let db = open_db();
         let session = make_session_with_cwd(&db, "claude", "/summary-boundary");
-        merge_item(&db, session.id, make_draft("summary-t5-start", 1_767_225_600, 1, 2, 0.10)).unwrap();
-        merge_item(&db, session.id, make_draft("summary-t5-end", 1_769_817_600, 3, 4, 0.20)).unwrap();
-        merge_item(&db, session.id, make_draft("summary-t5-before", 1_767_139_200, 10, 10, 1.00)).unwrap();
-        merge_item(&db, session.id, make_draft("summary-t5-after", 1_769_904_000, 10, 10, 1.00)).unwrap();
+        merge_item(
+            &db,
+            session.id,
+            make_draft("summary-t5-start", 1_767_225_600, 1, 2, 0.10),
+        )
+        .unwrap();
+        merge_item(
+            &db,
+            session.id,
+            make_draft("summary-t5-end", 1_769_817_600, 3, 4, 0.20),
+        )
+        .unwrap();
+        merge_item(
+            &db,
+            session.id,
+            make_draft("summary-t5-before", 1_767_139_200, 10, 10, 1.00),
+        )
+        .unwrap();
+        merge_item(
+            &db,
+            session.id,
+            make_draft("summary-t5-after", 1_769_904_000, 10, 10, 1.00),
+        )
+        .unwrap();
 
         let actual = SummaryRepository::new(db)
             .summarize("2026-01-01", "2026-01-31")
@@ -1308,5 +1379,125 @@ mod summary {
         assert_eq!(actual.session_count, 1);
         assert_eq!(actual.total_tokens, 10);
         assert!((actual.total_cost - 0.30).abs() < 1e-9);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mod app_settings — C1 + C2
+// ---------------------------------------------------------------------------
+mod app_settings {
+    use super::*;
+
+    // C2: schema version is 4 after all migrations
+    #[test]
+    fn user_version_is_4() {
+        let db = open_db();
+        let conn = db.lock();
+        let uv: i32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv, 4, "user_version should be 4 after migration 0004");
+    }
+
+    // C2: app_settings table schema
+    #[test]
+    fn table_info_has_correct_columns() {
+        let db = open_db();
+        let conn = db.lock();
+
+        // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
+        let mut stmt = conn.prepare("PRAGMA table_info('app_settings')").unwrap();
+        let rows: Vec<(String, String, i32, i32)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?, // name
+                    r.get::<_, String>(2)?, // type
+                    r.get::<_, i32>(3)?,    // notnull
+                    r.get::<_, i32>(5)?,    // pk
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        let key_col = rows.iter().find(|(name, ..)| name == "key").unwrap();
+        assert_eq!(key_col.1, "TEXT", "key column type must be TEXT");
+        assert_eq!(key_col.3, 1, "key must be primary key (pk=1)");
+
+        let value_col = rows.iter().find(|(name, ..)| name == "value").unwrap();
+        assert_eq!(value_col.1, "TEXT", "value column type must be TEXT");
+        assert_eq!(value_col.2, 1, "value must be NOT NULL (notnull=1)");
+        assert_eq!(value_col.3, 0, "value must not be primary key (pk=0)");
+    }
+
+    // C2: ON CONFLICT upsert leaves exactly one row
+    #[test]
+    fn on_conflict_upsert_leaves_one_row() {
+        let db = open_db();
+        {
+            let conn = db.lock();
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('k', 'v')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES ('k', 'v2') \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM app_settings", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1, "upsert must leave exactly one row");
+            let val: String = conn
+                .query_row("SELECT value FROM app_settings WHERE key = 'k'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(val, "v2", "upserted value must be 'v2'");
+        }
+    }
+
+    // C1: get absent key → Ok(None)
+    #[test]
+    fn get_absent_key_returns_none() {
+        let db = open_db();
+        let repo = AppSettingsRepository::new(db);
+        let result = repo.get("missing").unwrap();
+        assert_eq!(result, None);
+    }
+
+    // C1: set then get returns the stored value
+    #[test]
+    fn set_then_get_returns_value() {
+        let db = open_db();
+        let repo = AppSettingsRepository::new(db);
+        repo.set("foo", "bar").unwrap();
+        let result = repo.get("foo").unwrap();
+        assert_eq!(result, Some("bar".to_string()));
+    }
+
+    // C1: overwrite with second set wins
+    #[test]
+    fn double_set_overwrites() {
+        let db = open_db();
+        let repo = AppSettingsRepository::new(db);
+        repo.set("foo", "bar").unwrap();
+        repo.set("foo", "baz").unwrap();
+        let result = repo.get("foo").unwrap();
+        assert_eq!(result, Some("baz".to_string()));
+    }
+
+    // C1: independent keys do not interfere
+    #[test]
+    fn independent_keys_do_not_interfere() {
+        let db = open_db();
+        let repo = AppSettingsRepository::new(db);
+        repo.set("a", "1").unwrap();
+        repo.set("b", "2").unwrap();
+        assert_eq!(repo.get("a").unwrap(), Some("1".to_string()));
+        assert_eq!(repo.get("b").unwrap(), Some("2".to_string()));
     }
 }

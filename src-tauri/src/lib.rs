@@ -1,3 +1,6 @@
+mod notifications;
+pub use notifications::notify;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
@@ -8,8 +11,9 @@ use anyhow::Context;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use tallytape_core::{
-    db_path, AggregationBucket, AggregationRepository, Database, Item, ItemRepository,
-    ModelBreakdown, RangeSummary, Receipt, ReceiptRepository, ReceiptSummary, SummaryRepository,
+    db_path, AggregationBucket, AggregationRepository, AppSettingsRepository, Database, Item,
+    ItemRepository, ModelBreakdown, RangeSummary, Receipt, ReceiptRepository, ReceiptSummary,
+    SummaryRepository,
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -297,6 +301,14 @@ impl AppBackend {
             .map(Into::into)
     }
 
+    pub fn app_setting_get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        AppSettingsRepository::new(self.db.clone()).get(key)
+    }
+
+    pub fn app_setting_set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        AppSettingsRepository::new(self.db.clone()).set(key, value)
+    }
+
     pub fn refresh_receipt_snapshot(&self) -> anyhow::Result<()> {
         let snapshot = self.current_receipt_snapshot()?;
         *self
@@ -437,6 +449,19 @@ fn get_summary(state: State<'_, AppState>, date_range: DateRange) -> AppResult<R
     state.backend.get_summary(date_range).map_err(app_error)
 }
 
+#[tauri::command]
+fn get_app_setting(state: State<'_, AppState>, key: String) -> AppResult<Option<String>> {
+    state.backend.app_setting_get(&key).map_err(app_error)
+}
+
+#[tauri::command]
+fn set_app_setting(state: State<'_, AppState>, key: String, value: String) -> AppResult<()> {
+    state
+        .backend
+        .app_setting_set(&key, &value)
+        .map_err(app_error)
+}
+
 fn app_error(error: anyhow::Error) -> AppError {
     error.into()
 }
@@ -547,6 +572,7 @@ fn run_debounced_receipt_scanner<E: EventEmitter>(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let path = db_path().context("failed to resolve tallytape database path")?;
             let backend =
@@ -564,7 +590,9 @@ pub fn run() {
             list_items_by_receipt,
             list_receipt_summaries,
             get_aggregation,
-            get_summary
+            get_summary,
+            get_app_setting,
+            set_app_setting
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

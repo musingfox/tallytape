@@ -11,6 +11,7 @@ fn migrations() -> Migrations<'static> {
             "../migrations/0002_receipts_updated_at_trigger.sql"
         )),
         M::up(include_str!("../migrations/0003_receipts_cwd_date.sql")),
+        M::up(include_str!("../migrations/0004_app_settings.sql")),
     ])
 }
 
@@ -148,7 +149,7 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
 
-        for table in &["sessions", "receipts", "items", "pricing"] {
+        for table in &["sessions", "receipts", "items", "pricing", "app_settings"] {
             assert!(tables.contains(*table), "table {table} should exist");
         }
     }
@@ -210,7 +211,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(
-            uv, 3,
+            uv, 4,
             "user_version should match number of migrations applied"
         );
     }

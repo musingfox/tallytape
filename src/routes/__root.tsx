@@ -1,6 +1,7 @@
 import { Link, createRootRoute, Outlet } from "@tanstack/react-router";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Toaster } from "../components/Toaster";
+import { getAppSetting, requestNotificationPermission, setAppSetting } from "../ipc";
 
 const TanStackRouterDevtools = import.meta.env.PROD
   ? () => null
@@ -10,8 +11,21 @@ const TanStackRouterDevtools = import.meta.env.PROD
       })),
     );
 
-export const Route = createRootRoute({
-  component: () => (
+function RootComponent() {
+  useEffect(() => {
+    (async () => {
+      const asked = await getAppSetting("notification_permission_asked");
+      if (asked === null) {
+        try {
+          await requestNotificationPermission();
+        } finally {
+          await setAppSetting("notification_permission_asked", "true");
+        }
+      }
+    })().catch(console.error);
+  }, []);
+
+  return (
     <>
       <header role="banner">
         <h1>TallyTape</h1>
@@ -25,5 +39,9 @@ export const Route = createRootRoute({
         <TanStackRouterDevtools />
       </Suspense>
     </>
-  ),
+  );
+}
+
+export const Route = createRootRoute({
+  component: RootComponent,
 });

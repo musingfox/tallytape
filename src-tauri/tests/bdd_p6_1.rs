@@ -53,8 +53,7 @@ fn seed_receipt(backend: &AppBackend, cwd: &str, date: &str) {
 #[given("a fresh tallytape data directory")]
 async fn fresh_data_dir(world: &mut DrawerWorld) {
     let tmp = TempDir::new().expect("tempdir");
-    let backend =
-        AppBackend::open(tmp.path().join("tallytape.sqlite")).expect("open backend");
+    let backend = AppBackend::open(tmp.path().join("tallytape.sqlite")).expect("open backend");
     world.tmp = Some(tmp);
     world.backend = Some(BackendCell(backend));
 }

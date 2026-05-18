@@ -64,6 +64,11 @@ export default tseslint.config(
               importNames: ["invoke"],
               message: "Import wrappers from src/ipc instead of calling invoke directly.",
             },
+            {
+              name: "@tauri-apps/plugin-notification",
+              message:
+                "Import wrappers from src/ipc/notifications instead of calling the plugin directly.",
+            },
           ],
         },
       ],
