@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tallytape_core::{
     db_path, AggregationBucket, AggregationRepository, AppSettingsRepository, Database, Item,
     ItemRepository, ModelBreakdown, RangeSummary, Receipt, ReceiptRepository, ReceiptSummary,
-    SummaryRepository,
+    SummaryRepository, LAST_SEEN_MAX_UPDATED_AT, LAST_SEEN_RECEIPT_ID,
 };
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -22,6 +22,7 @@ use tauri::{AppHandle, Manager, State};
 const RECEIPT_ADDED_EVENT: &str = "receipt-added";
 const RECEIPT_UPDATED_EVENT: &str = "receipt-updated";
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(100);
+const BOOT_CATCHUP_CAP: usize = 50;
 
 type AppResult<T> = Result<T, AppError>;
 
@@ -194,6 +195,20 @@ pub struct ReceiptSummaryDto {
     pub item_count: i64,
 }
 
+/// One-shot boot-catch-up payload returned to the frontend on the first
+/// `take_boot_catchup` IPC call after launch. Subsequent calls within the
+/// same process return `pending_ids` empty and `overflow_count` 0 (the
+/// `receipts` snapshot still reflects the latest DB state).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BootCatchupDto {
+    pub receipts: Vec<ReceiptDto>,
+    pub pending_ids: Vec<i64>,
+    /// Number of additional receipts that arrived beyond the visible
+    /// `pending_ids` cap. `> 0` ⇒ overflow row should render in the UI.
+    pub overflow_count: i64,
+}
+
 impl From<ReceiptSummary> for ReceiptSummaryDto {
     fn from(summary: ReceiptSummary) -> Self {
         Self {
@@ -264,6 +279,10 @@ enum WatchSignal {
 pub struct AppBackend {
     db: Database,
     receipt_snapshot: Mutex<HashMap<i64, i64>>,
+    /// Boot-catch-up pending payload, populated once at startup by
+    /// `prepare_boot_catchup` and drained by the first `take_boot_catchup`
+    /// IPC call. `(pending_ids, overflow_count)`.
+    boot_pending: Mutex<Option<(Vec<i64>, i64)>>,
 }
 
 impl AppBackend {
@@ -272,6 +291,7 @@ impl AppBackend {
         let backend = Self {
             db,
             receipt_snapshot: Mutex::new(HashMap::new()),
+            boot_pending: Mutex::new(None),
         };
         backend.refresh_receipt_snapshot()?;
         Ok(backend)
@@ -334,6 +354,129 @@ impl AppBackend {
 
     pub fn app_setting_set(&self, key: &str, value: &str) -> anyhow::Result<()> {
         AppSettingsRepository::new(self.db.clone()).set(key, value)
+    }
+
+    /// Run the boot-time catch-up: compare persisted cursors against the
+    /// current `receipts` table, stash the pending-id set for the frontend
+    /// to drain via `take_boot_catchup`, and advance cursors past every
+    /// loaded row (including the overflow remainder).
+    ///
+    /// Returns the **true** number of newly-arrived receipts (not
+    /// overflow-capped); the caller uses this both to decide whether to
+    /// fire the summary notification and to build its body text.
+    ///
+    /// First-ever launch (both cursors absent) seeds cursors to the
+    /// current top-of-table and returns `0`, so users do not get spammed
+    /// on the very first run.
+    pub fn prepare_boot_catchup(&self) -> anyhow::Result<i64> {
+        let settings = AppSettingsRepository::new(self.db.clone());
+        let last_id = settings.get_i64(LAST_SEEN_RECEIPT_ID)?;
+        let last_ts = settings.get_i64(LAST_SEEN_MAX_UPDATED_AT)?;
+        let repo = ReceiptRepository::new(self.db.clone());
+
+        if last_id.is_none() && last_ts.is_none() {
+            let (max_id, max_ts) = repo.max_id_and_updated_at()?;
+            settings.set_i64(LAST_SEEN_RECEIPT_ID, max_id)?;
+            settings.set_i64(LAST_SEEN_MAX_UPDATED_AT, max_ts)?;
+            *self
+                .boot_pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("boot_pending mutex poisoned"))? =
+                Some((Vec::new(), 0));
+            return Ok(0);
+        }
+
+        let last_id = last_id.unwrap_or(0);
+        let last_ts = last_ts.unwrap_or(0);
+
+        let rows = repo.fetch_pending_since(last_id, last_ts, BOOT_CATCHUP_CAP)?;
+        let overflow = rows.len() > BOOT_CATCHUP_CAP;
+        let pending_ids: Vec<i64> = rows.iter().take(BOOT_CATCHUP_CAP).map(|r| r.id).collect();
+        let overflow_count = if overflow {
+            repo.count_pending_since(last_id, last_ts)?
+                .saturating_sub(BOOT_CATCHUP_CAP as i64)
+        } else {
+            0
+        };
+        let total_new = pending_ids.len() as i64 + overflow_count;
+
+        let mut max_loaded_id = last_id;
+        let mut max_loaded_ts = last_ts;
+        for r in &rows {
+            if r.id > max_loaded_id {
+                max_loaded_id = r.id;
+            }
+            if r.updated_at > max_loaded_ts {
+                max_loaded_ts = r.updated_at;
+            }
+        }
+        settings.set_i64_max(LAST_SEEN_RECEIPT_ID, max_loaded_id)?;
+        settings.set_i64_max(LAST_SEEN_MAX_UPDATED_AT, max_loaded_ts)?;
+
+        *self
+            .boot_pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("boot_pending mutex poisoned"))? =
+            Some((pending_ids, overflow_count));
+        Ok(total_new)
+    }
+
+    /// Build the boot-catch-up DTO for the frontend. The pending-ids /
+    /// overflow-count fields are drained on first call and reset to empty
+    /// on subsequent calls; `receipts` always reflects the current DB.
+    pub fn take_boot_catchup(&self) -> anyhow::Result<BootCatchupDto> {
+        let receipts = self.list_receipts(None)?;
+        let (pending_ids, overflow_count) = self
+            .boot_pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("boot_pending mutex poisoned"))?
+            .take()
+            .unwrap_or_default();
+        Ok(BootCatchupDto {
+            receipts,
+            pending_ids,
+            overflow_count,
+        })
+    }
+
+    /// Max-merge the persisted cursors against the max `(id, updated_at)`
+    /// across `changes`. No-op when `changes` is empty.
+    pub fn bump_cursors_from_changes(&self, changes: &[ReceiptChange]) -> anyhow::Result<()> {
+        let mut max_id = 0i64;
+        let mut max_ts = 0i64;
+        for change in changes {
+            let r = match change {
+                ReceiptChange::Added(r) | ReceiptChange::Updated(r) => r,
+            };
+            if r.id > max_id {
+                max_id = r.id;
+            }
+            if r.updated_at > max_ts {
+                max_ts = r.updated_at;
+            }
+        }
+        if max_id == 0 && max_ts == 0 {
+            return Ok(());
+        }
+        let settings = AppSettingsRepository::new(self.db.clone());
+        settings.set_i64_max(LAST_SEEN_RECEIPT_ID, max_id)?;
+        settings.set_i64_max(LAST_SEEN_MAX_UPDATED_AT, max_ts)?;
+        Ok(())
+    }
+
+    /// Max-merge the persisted cursors against the current top-of-table
+    /// `(MAX(id), MAX(updated_at))`. Called on `WindowEvent::Focused(true)`
+    /// and on the true-exit path (`RunEvent::ExitRequested`).
+    pub fn bump_cursors_to_top(&self) -> anyhow::Result<()> {
+        let (max_id, max_ts) =
+            ReceiptRepository::new(self.db.clone()).max_id_and_updated_at()?;
+        if max_id == 0 && max_ts == 0 {
+            return Ok(());
+        }
+        let settings = AppSettingsRepository::new(self.db.clone());
+        settings.set_i64_max(LAST_SEEN_RECEIPT_ID, max_id)?;
+        settings.set_i64_max(LAST_SEEN_MAX_UPDATED_AT, max_ts)?;
+        Ok(())
     }
 
     pub fn refresh_receipt_snapshot(&self) -> anyhow::Result<()> {
@@ -489,6 +632,11 @@ fn set_app_setting(state: State<'_, AppState>, key: String, value: String) -> Ap
         .map_err(app_error)
 }
 
+#[tauri::command]
+fn take_boot_catchup(state: State<'_, AppState>) -> AppResult<BootCatchupDto> {
+    state.backend.take_boot_catchup().map_err(app_error)
+}
+
 fn app_error(error: anyhow::Error) -> AppError {
     error.into()
 }
@@ -607,6 +755,9 @@ fn run_debounced_receipt_scanner<E: EventEmitter, F: FocusProbe, N: Notification
                                 }
                             }
                         }
+                        if let Err(e) = backend.bump_cursors_from_changes(&changes) {
+                            eprintln!("failed to bump catch-up cursors after batch: {e}");
+                        }
                     }
                     Err(error) => eprintln!("failed to scan receipt changes: {error}"),
                 }
@@ -642,6 +793,24 @@ pub fn run() {
             let path = db_path().context("failed to resolve tallytape database path")?;
             let backend =
                 Arc::new(AppBackend::open(&path).context("failed to open tallytape database")?);
+
+            // Run boot catch-up before wiring the watcher / state so the
+            // initial cursor advance precedes any live-arrival writes.
+            match backend.prepare_boot_catchup() {
+                Ok(total_new) if total_new > 0 => {
+                    let body = if total_new == 1 {
+                        "+1 receipt while you were away".to_string()
+                    } else {
+                        format!("+{total_new} receipts while you were away")
+                    };
+                    if let Err(e) = notify(&app.handle().clone(), "tallytape", &body) {
+                        eprintln!("boot catch-up notification failed: {e}");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("boot catch-up failed: {e}"),
+            }
+
             let handle = app.handle().clone();
             let watcher = start_receipt_watcher(
                 handle.clone(),
@@ -651,7 +820,7 @@ pub fn run() {
                 path,
             )?;
             app.manage(AppState {
-                backend,
+                backend: Arc::clone(&backend),
                 watcher: Mutex::new(Some(watcher)),
             });
 
@@ -679,13 +848,20 @@ pub fn run() {
                     app.manage(TrayState { _icon: tray });
                     if let Some(window) = app.get_webview_window("main") {
                         let win_for_event = window.clone();
-                        window.on_window_event(move |event| {
-                            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let backend_for_event = Arc::clone(&backend);
+                        window.on_window_event(move |event| match event {
+                            tauri::WindowEvent::CloseRequested { api, .. } => {
                                 api.prevent_close();
                                 if let Err(e) = win_for_event.hide() {
                                     eprintln!("close-to-tray: failed to hide main window: {e}");
                                 }
                             }
+                            tauri::WindowEvent::Focused(true) => {
+                                if let Err(e) = backend_for_event.bump_cursors_to_top() {
+                                    eprintln!("focus: cursor bump failed: {e}");
+                                }
+                            }
+                            _ => {}
                         });
                     }
                 }
@@ -702,13 +878,17 @@ pub fn run() {
             get_aggregation,
             get_summary,
             get_app_setting,
-            set_app_setting
+            set_app_setting,
+            take_boot_catchup
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match event {
             tauri::RunEvent::ExitRequested { .. } => {
                 if let Some(state) = app.try_state::<AppState>() {
+                    if let Err(e) = state.backend.bump_cursors_to_top() {
+                        eprintln!("exit: cursor bump failed: {e}");
+                    }
                     state.shutdown_watcher();
                 }
             }
@@ -2382,6 +2562,225 @@ mod tests {
                 .iter()
                 .all(|(t, b)| t == "tallytape" && b == "+1 receipt"),
             "all notifications must have correct title and body"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // p6-8 — boot catch-up orchestration on AppBackend
+    // -----------------------------------------------------------------------
+
+    fn raw_receipt(db: &Database, id: i64, updated_at: i64, cwd: &str) {
+        let conn = db.lock();
+        conn.execute(
+            "INSERT INTO receipts (id, session_id, cwd, date, created_at, updated_at) \
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, cwd, "2026-05-19", updated_at, updated_at],
+        )
+        .unwrap();
+    }
+
+    fn read_cursor(db: &Database, key: &str) -> Option<i64> {
+        AppSettingsRepository::new(db.clone()).get_i64(key).unwrap()
+    }
+
+    #[test]
+    fn prepare_boot_catchup_first_launch_seeds_cursors_and_returns_zero() {
+        let (_dir, backend) = test_backend();
+        raw_receipt(backend.database(), 1, 1_000, "/a");
+        raw_receipt(backend.database(), 2, 1_500, "/b");
+
+        let total_new = backend.prepare_boot_catchup().unwrap();
+        assert_eq!(total_new, 0, "first launch must not surface anything");
+
+        // Cursors seeded to current top-of-table.
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID),
+            Some(2)
+        );
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_MAX_UPDATED_AT),
+            Some(1_500)
+        );
+
+        // take_boot_catchup drains an empty pending set on first call.
+        let payload = backend.take_boot_catchup().unwrap();
+        assert_eq!(payload.receipts.len(), 2);
+        assert!(payload.pending_ids.is_empty());
+        assert_eq!(payload.overflow_count, 0);
+    }
+
+    #[test]
+    fn prepare_boot_catchup_first_launch_with_empty_table_seeds_zero() {
+        let (_dir, backend) = test_backend();
+        let total_new = backend.prepare_boot_catchup().unwrap();
+        assert_eq!(total_new, 0);
+        assert_eq!(read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID), Some(0));
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_MAX_UPDATED_AT),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn prepare_boot_catchup_returns_new_rows_after_seed() {
+        let (_dir, backend) = test_backend();
+        raw_receipt(backend.database(), 1, 1_000, "/seen-a");
+        backend.prepare_boot_catchup().unwrap(); // first-launch seed
+        // Drain so the next take_boot_catchup sees a fresh payload.
+        let _ = backend.take_boot_catchup().unwrap();
+
+        // Now insert 3 new rows after the seed.
+        raw_receipt(backend.database(), 2, 2_000, "/new-a");
+        raw_receipt(backend.database(), 3, 2_500, "/new-b");
+        raw_receipt(backend.database(), 4, 3_000, "/new-c");
+
+        let total_new = backend.prepare_boot_catchup().unwrap();
+        assert_eq!(total_new, 3);
+
+        let payload = backend.take_boot_catchup().unwrap();
+        assert_eq!(payload.pending_ids.len(), 3);
+        // Newest-first ordering.
+        assert_eq!(payload.pending_ids, vec![4, 3, 2]);
+        assert_eq!(payload.overflow_count, 0);
+
+        // Cursors advanced past all new rows.
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID),
+            Some(4)
+        );
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_MAX_UPDATED_AT),
+            Some(3_000)
+        );
+    }
+
+    #[test]
+    fn prepare_boot_catchup_caps_pending_ids_and_reports_overflow() {
+        let (_dir, backend) = test_backend();
+        // Pre-seed cursors to 0 explicitly so first call is not first-launch.
+        let settings = AppSettingsRepository::new(backend.database().clone());
+        settings.set_i64(LAST_SEEN_RECEIPT_ID, 0).unwrap();
+        settings.set_i64(LAST_SEEN_MAX_UPDATED_AT, 0).unwrap();
+
+        // Insert 52 receipts (cap = 50; expect 50 pending + overflow_count = 2).
+        for i in 1..=52i64 {
+            raw_receipt(backend.database(), i, 10_000 + i, &format!("/r-{i}"));
+        }
+
+        let total_new = backend.prepare_boot_catchup().unwrap();
+        assert_eq!(total_new, 52, "true total must include overflow rows");
+
+        let payload = backend.take_boot_catchup().unwrap();
+        assert_eq!(payload.pending_ids.len(), 50);
+        assert_eq!(payload.overflow_count, 2);
+        // Visible pending = top 50 by id DESC = 52..3 inclusive.
+        assert_eq!(payload.pending_ids.first(), Some(&52));
+        assert_eq!(payload.pending_ids.last(), Some(&3));
+
+        // Cursors advanced past ALL loaded rows (including overflow remainder).
+        // fetch_pending_since loads cap+1 = 51 rows; rows[50] has id = 2.
+        // So cursor should be max id loaded = 52.
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID),
+            Some(52)
+        );
+    }
+
+    #[test]
+    fn take_boot_catchup_drains_once() {
+        let (_dir, backend) = test_backend();
+        raw_receipt(backend.database(), 1, 1_000, "/a");
+        let settings = AppSettingsRepository::new(backend.database().clone());
+        settings.set_i64(LAST_SEEN_RECEIPT_ID, 0).unwrap();
+        settings.set_i64(LAST_SEEN_MAX_UPDATED_AT, 0).unwrap();
+        backend.prepare_boot_catchup().unwrap();
+
+        let first = backend.take_boot_catchup().unwrap();
+        assert_eq!(first.pending_ids, vec![1]);
+
+        let second = backend.take_boot_catchup().unwrap();
+        assert!(
+            second.pending_ids.is_empty(),
+            "subsequent take must yield empty pending set"
+        );
+        // Receipts list still populated.
+        assert_eq!(second.receipts.len(), 1);
+    }
+
+    #[test]
+    fn bump_cursors_from_changes_is_noop_on_empty_input() {
+        let (_dir, backend) = test_backend();
+        backend.bump_cursors_from_changes(&[]).unwrap();
+        // No row should be created.
+        assert_eq!(read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID), None);
+    }
+
+    #[test]
+    fn bump_cursors_from_changes_writes_batch_max() {
+        let (_dir, backend) = test_backend();
+        let dto = |id: i64, updated_at: i64| ReceiptDto {
+            id,
+            session_id: None,
+            cwd: format!("/x-{id}"),
+            date: "2026-05-19".to_string(),
+            created_at: updated_at,
+            updated_at,
+        };
+        let changes = vec![
+            ReceiptChange::Added(dto(3, 3_000)),
+            ReceiptChange::Updated(dto(5, 5_000)),
+            ReceiptChange::Added(dto(4, 4_000)),
+        ];
+        backend.bump_cursors_from_changes(&changes).unwrap();
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID),
+            Some(5)
+        );
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_MAX_UPDATED_AT),
+            Some(5_000)
+        );
+    }
+
+    #[test]
+    fn bump_cursors_to_top_is_noop_when_table_empty() {
+        let (_dir, backend) = test_backend();
+        backend.bump_cursors_to_top().unwrap();
+        assert_eq!(read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID), None);
+    }
+
+    #[test]
+    fn bump_cursors_to_top_writes_current_max() {
+        let (_dir, backend) = test_backend();
+        raw_receipt(backend.database(), 7, 7_000, "/a");
+        raw_receipt(backend.database(), 3, 9_000, "/b");
+        backend.bump_cursors_to_top().unwrap();
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID),
+            Some(7)
+        );
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_MAX_UPDATED_AT),
+            Some(9_000)
+        );
+    }
+
+    #[test]
+    fn bump_cursors_never_rolls_backwards() {
+        let (_dir, backend) = test_backend();
+        let settings = AppSettingsRepository::new(backend.database().clone());
+        settings.set_i64(LAST_SEEN_RECEIPT_ID, 100).unwrap();
+        settings.set_i64(LAST_SEEN_MAX_UPDATED_AT, 100).unwrap();
+        raw_receipt(backend.database(), 50, 50, "/older");
+        backend.bump_cursors_to_top().unwrap();
+        // MAX-merge keeps the larger existing value.
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_RECEIPT_ID),
+            Some(100)
+        );
+        assert_eq!(
+            read_cursor(backend.database(), LAST_SEEN_MAX_UPDATED_AT),
+            Some(100)
         );
     }
 }

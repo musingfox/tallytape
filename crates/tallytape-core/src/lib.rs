@@ -1,5 +1,5 @@
 mod app_settings;
-pub use app_settings::AppSettingsRepository;
+pub use app_settings::{AppSettingsRepository, LAST_SEEN_MAX_UPDATED_AT, LAST_SEEN_RECEIPT_ID};
 
 mod aggregation;
 pub use aggregation::{AggregationBucket, AggregationRepository, ModelBreakdown};

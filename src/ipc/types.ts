@@ -74,3 +74,11 @@ export interface AggregationBucketDto {
   totalTokens: number;
   modelBreakdown: ModelBreakdownDto[];
 }
+
+/** Rust source: src-tauri/src/lib.rs BootCatchupDto */
+export interface BootCatchupDto {
+  receipts: ReceiptDto[];
+  pendingIds: number[];
+  /** Receipts beyond the visible cap; render an overflow row when > 0. */
+  overflowCount: number;
+}

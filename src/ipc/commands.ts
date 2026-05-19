@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AggregationBucketDto,
   AppError,
+  BootCatchupDto,
   DateRange,
   Granularity,
   ItemDto,
@@ -59,6 +60,17 @@ export function getAggregation(
  */
 export function getSummary(dateRange: DateRange): Promise<RangeSummaryDto> {
   return invoke<RangeSummaryDto>('get_summary', { dateRange });
+}
+
+/**
+ * One-shot boot catch-up: returns the current receipts snapshot plus the
+ * ids of any receipts that arrived while the app was closed (p6-8).
+ * Subsequent calls within the same process return an empty pending set.
+ *
+ * Rust command source: src-tauri/src/lib.rs take_boot_catchup.
+ */
+export function takeBootCatchup(): Promise<BootCatchupDto> {
+  return invoke<BootCatchupDto>('take_boot_catchup');
 }
 
 export type { AppError };

@@ -15,15 +15,19 @@ interface ReceiptState {
   receipts: Map<number, Receipt>;
   selectedId: number | null;
   pendingArrivals: Receipt[];
+  /** Boot catch-up overflow: receipts arrived beyond the visible cap. */
+  pendingOverflowCount: number;
   loadStatus: ReceiptLoadStatus;
   loadError: string | null;
   errors: ReceiptError[];
   dateFilter: string | null;
   setReceipts: (list: Receipt[]) => void;
+  hydrateWithPending: (list: Receipt[], pendingIds: number[], overflowCount: number) => void;
   addReceipt: (r: Receipt) => void;
   updateReceipt: (r: Receipt) => void;
   selectReceipt: (id: number | null) => void;
   clearPendingArrivals: () => void;
+  clearPendingOverflow: () => void;
   dismissPendingArrival: (id: number) => void;
   setLoadStatus: (status: ReceiptLoadStatus, error?: string | null) => void;
   pushError: (message: string) => string;
@@ -37,6 +41,7 @@ export const useReceiptStore = create<ReceiptState>()(
       receipts: new Map(),
       selectedId: null,
       pendingArrivals: [],
+      pendingOverflowCount: 0,
       loadStatus: 'idle',
       loadError: null,
       errors: [],
@@ -55,6 +60,45 @@ export const useReceiptStore = create<ReceiptState>()(
             }
           }
           return { receipts: next, pendingArrivals: [] };
+        });
+      },
+
+      hydrateWithPending(list: Receipt[], pendingIds: number[], overflowCount: number) {
+        // Boot-catch-up hydration: populates the receipts map AND marks
+        // the catch-up subset as pendingArrivals so the drawer can animate
+        // them on next render. Unlike setReceipts, this preserves any
+        // pendingArrivals already added by a live event that raced ahead
+        // of the boot IPC response.
+        set((state) => {
+          const next = new Map<number, Receipt>();
+          for (const item of list) {
+            next.set(item.id, item);
+          }
+          for (const existing of state.receipts.values()) {
+            const incoming = next.get(existing.id);
+            if (incoming == null || existing.updatedAt >= incoming.updatedAt) {
+              next.set(existing.id, existing);
+            }
+          }
+          const pendingSet = new Set(pendingIds);
+          const livePendingIds = new Set(state.pendingArrivals.map((p) => p.id));
+          const catchupArrivals: Receipt[] = [];
+          for (const id of pendingIds) {
+            if (livePendingIds.has(id)) continue;
+            const receipt = next.get(id);
+            if (receipt != null) {
+              catchupArrivals.push(receipt);
+            }
+          }
+          const mergedPending = [
+            ...state.pendingArrivals.filter((p) => next.has(p.id) || pendingSet.has(p.id)),
+            ...catchupArrivals,
+          ];
+          return {
+            receipts: next,
+            pendingArrivals: mergedPending,
+            pendingOverflowCount: overflowCount,
+          };
         });
       },
 
@@ -88,6 +132,10 @@ export const useReceiptStore = create<ReceiptState>()(
 
       clearPendingArrivals() {
         set({ pendingArrivals: [] });
+      },
+
+      clearPendingOverflow() {
+        set({ pendingOverflowCount: 0 });
       },
 
       dismissPendingArrival(id: number) {
@@ -137,6 +185,10 @@ export function useSelectedReceipt(): Receipt | null {
 
 export function usePendingArrivals(): Receipt[] {
   return useReceiptStore((state) => state.pendingArrivals);
+}
+
+export function usePendingOverflowCount(): number {
+  return useReceiptStore((state) => state.pendingOverflowCount);
 }
 
 export function useReceiptLoadStatus(): { status: ReceiptLoadStatus; error: string | null } {

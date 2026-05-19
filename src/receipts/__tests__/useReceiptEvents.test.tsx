@@ -55,7 +55,7 @@ describe('F3 — useReceiptEvents', () => {
       return Promise.resolve(unlistenSpy);
     });
 
-    mockedInvoke.mockResolvedValue([r1, r2]);
+    mockedInvoke.mockResolvedValue({ receipts: [r1, r2], pendingIds: [], overflowCount: 0 });
 
     const { unmount } = render(
       <StrictMode>
@@ -141,7 +141,7 @@ describe('F3 — useReceiptEvents', () => {
 
   it('listen rejection records a toast error without throwing', async () => {
     mockedListen.mockRejectedValue(new Error('listen failed'));
-    mockedInvoke.mockResolvedValue([]);
+    mockedInvoke.mockResolvedValue({ receipts: [], pendingIds: [], overflowCount: 0 });
 
     render(
       <StrictMode>
@@ -157,7 +157,7 @@ describe('F3 — useReceiptEvents', () => {
   it('unmount still calls resolved unlisten when one listen rejects', async () => {
     const unlistenSpy = vi.fn();
     mockedListen.mockRejectedValueOnce(new Error('listen failed')).mockResolvedValue(unlistenSpy);
-    mockedInvoke.mockResolvedValue([]);
+    mockedInvoke.mockResolvedValue({ receipts: [], pendingIds: [], overflowCount: 0 });
 
     const { unmount } = render(
       <StrictMode>
@@ -174,8 +174,9 @@ describe('F3 — useReceiptEvents', () => {
 
 describe('F4 — Initial-load / event race tolerance', () => {
   it('event before initial setReceipts — event wins when invoke returns older data', async () => {
-    let resolveInvoke!: (value: Receipt[]) => void;
-    const invokePromise = new Promise<Receipt[]>((resolve) => {
+    type BootPayload = { receipts: Receipt[]; pendingIds: number[]; overflowCount: number };
+    let resolveInvoke!: (value: BootPayload) => void;
+    const invokePromise = new Promise<BootPayload>((resolve) => {
       resolveInvoke = resolve;
     });
 
@@ -209,10 +210,14 @@ describe('F4 — Initial-load / event race tolerance', () => {
 
     // Now resolve invoke with older data (updatedAt=100)
     await act(async () => {
-      resolveInvoke([{ ...r1, updatedAt: 100 }]);
+      resolveInvoke({
+        receipts: [{ ...r1, updatedAt: 100 }],
+        pendingIds: [],
+        overflowCount: 0,
+      });
     });
 
-    // setReceipts must NOT clobber the newer event data
+    // hydrateWithPending must NOT clobber the newer event data
     expect(useReceiptStore.getState().receipts.get(r1.id)?.updatedAt).toBe(200);
   });
 
@@ -225,7 +230,11 @@ describe('F4 — Initial-load / event race tolerance', () => {
       return Promise.resolve(unlistenSpy);
     });
 
-    mockedInvoke.mockResolvedValue([{ ...r1, updatedAt: 200 }]);
+    mockedInvoke.mockResolvedValue({
+      receipts: [{ ...r1, updatedAt: 200 }],
+      pendingIds: [],
+      overflowCount: 0,
+    });
 
     render(
       <StrictMode>

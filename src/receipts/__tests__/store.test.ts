@@ -185,6 +185,51 @@ describe('receipt store actions', () => {
     expect(useReceiptStore.getState().errors).toHaveLength(1);
   });
 
+  it('hydrateWithPending populates receipts and marks pendingIds as pendingArrivals', () => {
+    useReceiptStore.getState().hydrateWithPending([r1, r2, r3], [2, 3], 0);
+
+    const state = useReceiptStore.getState();
+    expect(state.receipts.size).toBe(3);
+    expect(state.pendingArrivals.map((p) => p.id).sort()).toEqual([2, 3]);
+    expect(state.pendingOverflowCount).toBe(0);
+  });
+
+  it('hydrateWithPending records overflowCount and surfaces it via selector', () => {
+    useReceiptStore.getState().hydrateWithPending([r1], [1], 42);
+
+    expect(useReceiptStore.getState().pendingOverflowCount).toBe(42);
+  });
+
+  it('hydrateWithPending preserves a live pendingArrival that raced the boot IPC', () => {
+    // Live event arrived before the boot IPC settled.
+    useReceiptStore.getState().addReceipt(r2);
+    expect(useReceiptStore.getState().pendingArrivals.map((p) => p.id)).toEqual([2]);
+
+    // Boot IPC settles; r2 is not in pendingIds (boot cursor advanced past it).
+    useReceiptStore.getState().hydrateWithPending([r1, r2, r3], [3], 0);
+
+    const ids = useReceiptStore.getState().pendingArrivals.map((p) => p.id).sort();
+    // r2 still pending from the live event; r3 added by hydrate. No duplication.
+    expect(ids).toEqual([2, 3]);
+  });
+
+  it('hydrateWithPending keeps a newer existing receipt over an older incoming one', () => {
+    useReceiptStore.getState().addReceipt({ ...r1, updatedAt: 999, cwd: '/new' });
+
+    useReceiptStore.getState().hydrateWithPending([{ ...r1, updatedAt: 1, cwd: '/stale' }], [], 0);
+
+    expect(useReceiptStore.getState().receipts.get(1)?.cwd).toBe('/new');
+    expect(useReceiptStore.getState().receipts.get(1)?.updatedAt).toBe(999);
+  });
+
+  it('clearPendingOverflow resets the overflow counter without affecting other state', () => {
+    useReceiptStore.getState().hydrateWithPending([r1], [1], 5);
+    useReceiptStore.getState().clearPendingOverflow();
+    expect(useReceiptStore.getState().pendingOverflowCount).toBe(0);
+    expect(useReceiptStore.getState().receipts.size).toBe(1);
+    expect(useReceiptStore.getState().pendingArrivals.map((p) => p.id)).toEqual([1]);
+  });
+
   it('setDateFilter stores and clears the active date filter', () => {
     useReceiptStore.getState().setDateFilter('2026-05-17');
     expect(useReceiptStore.getState().dateFilter).toBe('2026-05-17');

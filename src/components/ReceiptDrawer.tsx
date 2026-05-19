@@ -7,6 +7,7 @@ import {
   useReceiptList,
   useReceiptLoadStatus,
   usePendingArrivals,
+  usePendingOverflowCount,
   useReceiptStore,
 } from '../receipts/store';
 
@@ -14,7 +15,9 @@ export function ReceiptDrawer() {
   const receipts = useReceiptList();
   const { status } = useReceiptLoadStatus();
   const pendingArrivals = usePendingArrivals();
+  const pendingOverflowCount = usePendingOverflowCount();
   const dismissPendingArrival = useReceiptStore((state) => state.dismissPendingArrival);
+  const clearPendingOverflow = useReceiptStore((state) => state.clearPendingOverflow);
   const navigate = useNavigate();
   const [summaries, setSummaries] = useState<Map<number, ReceiptSummaryDto>>(new Map());
   const [focusedIndex, setFocusedIndex] = useState(0);
@@ -207,6 +210,24 @@ export function ReceiptDrawer() {
                 </tr>
               </thead>
               <tbody ref={tbodyRef}>
+                {pendingOverflowCount > 0 && (
+                  <tr
+                    data-testid="pending-overflow-row"
+                    aria-label={`${pendingOverflowCount} additional receipts arrived while you were away — open the receipts list to view all`}
+                    className="border-b border-amber-200 bg-amber-50 text-amber-900"
+                  >
+                    <td className="px-4 py-2" colSpan={4}>
+                      <button
+                        type="button"
+                        className="w-full text-left"
+                        onClick={() => clearPendingOverflow()}
+                      >
+                        +{pendingOverflowCount} more arrived while you were away (open the
+                        receipts list to view all)
+                      </button>
+                    </td>
+                  </tr>
+                )}
                 <LayoutGroup>
                   <AnimatePresence initial={false}>
                     {sortedReceipts.map((receipt, index) => {

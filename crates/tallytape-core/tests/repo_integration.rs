@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use tallytape_core::{
     merge_item, AppSettingsRepository, Database, ItemRepository, NewItem, NewItemDraft, NewSession,
-    ReceiptRepository, SessionRepository, SummaryRepository,
+    ReceiptRepository, SessionRepository, SummaryRepository, LAST_SEEN_MAX_UPDATED_AT,
+    LAST_SEEN_RECEIPT_ID,
 };
 
 // ---------------------------------------------------------------------------
@@ -1499,5 +1500,204 @@ mod app_settings {
         repo.set("b", "2").unwrap();
         assert_eq!(repo.get("a").unwrap(), Some("1".to_string()));
         assert_eq!(repo.get("b").unwrap(), Some("2".to_string()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// p6-8 — boot catch-up: ReceiptRepository::fetch_pending_since +
+// AppSettingsRepository::set_i64_max ("cursors never roll backwards").
+// ---------------------------------------------------------------------------
+mod catchup {
+    use super::*;
+
+    /// Insert a `receipts` row directly so the test can control `id` and
+    /// `updated_at` independently of the trigger. Each row also gets a
+    /// unique `session_id` and `cwd` to satisfy `UNIQUE(cwd, date)`.
+    fn insert_receipt_raw(db: &Database, id: i64, updated_at: i64) {
+        let conn = db.lock();
+        let n = next_id();
+        // Use a unique cwd so the UNIQUE(cwd, date) constraint is satisfied
+        // across test rows, and assign a stable date string.
+        let cwd = format!("/p6-8-test/{n}");
+        let date = "2026-05-19";
+        conn.execute(
+            "INSERT INTO receipts (id, session_id, cwd, date, created_at, updated_at) \
+             VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, cwd, date, updated_at, updated_at],
+        )
+        .expect("raw receipt insert should succeed");
+    }
+
+    fn bump_updated_at(db: &Database, id: i64, new_updated_at: i64) {
+        let conn = db.lock();
+        conn.execute(
+            "UPDATE receipts SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![new_updated_at, id],
+        )
+        .expect("updated_at bump should succeed");
+    }
+
+    // M ≤ cap: every new row appears in pending_ids; rows.len() == M (no overflow).
+    #[test]
+    fn pending_returns_all_when_below_cap() {
+        let db = open_db();
+        let receipts_repo = ReceiptRepository::new(db.clone());
+        // Seed 5 rows the user has already seen.
+        for i in 1..=5 {
+            insert_receipt_raw(&db, i, 1_000 + i);
+        }
+        let last_id = 5;
+        let last_ts = 1_005;
+        // Now insert 3 new rows after the cursor.
+        for i in 6..=8 {
+            insert_receipt_raw(&db, i, 2_000 + i);
+        }
+
+        let rows = receipts_repo
+            .fetch_pending_since(last_id, last_ts, 50)
+            .unwrap();
+
+        assert_eq!(rows.len(), 3);
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        // ORDER BY id DESC.
+        assert_eq!(ids, vec![8, 7, 6]);
+    }
+
+    // M > cap: result has cap+1 rows; caller knows overflow occurred.
+    #[test]
+    fn pending_overflows_when_above_cap() {
+        let db = open_db();
+        let receipts_repo = ReceiptRepository::new(db.clone());
+        let cap = 3usize;
+        // Seen baseline.
+        insert_receipt_raw(&db, 1, 1_000);
+        let last_id = 1;
+        let last_ts = 1_000;
+        // 5 new rows; cap = 3 ⇒ expect 4 rows returned (cap + 1).
+        for i in 2..=6 {
+            insert_receipt_raw(&db, i, 2_000 + i);
+        }
+
+        let rows = receipts_repo
+            .fetch_pending_since(last_id, last_ts, cap)
+            .unwrap();
+        assert_eq!(rows.len(), cap + 1, "overflow signal: rows.len() > cap");
+
+        // Top `cap` ids in newest-first order.
+        let visible: Vec<i64> = rows.iter().take(cap).map(|r| r.id).collect();
+        assert_eq!(visible, vec![6, 5, 4]);
+
+        // count_pending_since must reflect the true total beyond the cap.
+        let total = receipts_repo
+            .count_pending_since(last_id, last_ts)
+            .unwrap();
+        assert_eq!(total, 5, "true total = 5 new rows since cursor");
+
+        // Caller advances cursors past ALL loaded rows. Even the overflow
+        // row's id should be reachable from the loaded set.
+        let max_id_loaded = rows.iter().map(|r| r.id).max().unwrap();
+        assert_eq!(max_id_loaded, 6);
+    }
+
+    // Updated_at branch: an old row whose updated_at gets bumped past the
+    // cursor must appear in pending on next boot, even though id ≤ cursor.
+    // This simulates a writer reingest.
+    #[test]
+    fn pending_includes_old_row_with_bumped_updated_at() {
+        let db = open_db();
+        let receipts_repo = ReceiptRepository::new(db.clone());
+        insert_receipt_raw(&db, 1, 1_000);
+        insert_receipt_raw(&db, 2, 1_001);
+        let last_id = 2;
+        let last_ts = 1_001;
+
+        // No newer rows, but bump id=1's updated_at past last_ts.
+        bump_updated_at(&db, 1, 5_000);
+
+        let rows = receipts_repo
+            .fetch_pending_since(last_id, last_ts, 50)
+            .unwrap();
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![1], "the bumped-updated_at old row must surface");
+    }
+
+    // Race-style smoke: many interleaved set_i64_max calls from two
+    // simulated writers (watcher batch + focus) must never lower the
+    // stored cursor. Single-statement MAX-merge in app_settings gives
+    // this guarantee without explicit locking.
+    #[test]
+    fn cursor_never_rolls_backwards_under_interleaved_writers() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(open_db());
+        let settings = AppSettingsRepository::new((*db).clone());
+        settings.set_i64(LAST_SEEN_RECEIPT_ID, 0).unwrap();
+
+        let mut handles = Vec::new();
+        // 2 threads, each writing a strictly-increasing sequence interleaved
+        // with smaller candidates that must be ignored.
+        for thread_idx in 0..2 {
+            let db = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                let r = AppSettingsRepository::new((*db).clone());
+                let base = (thread_idx + 1) * 10;
+                for i in 0..200 {
+                    // Sometimes write a small value (must be rejected by MAX).
+                    let candidate = if i % 3 == 0 { 1 } else { base + i };
+                    r.set_i64_max(LAST_SEEN_RECEIPT_ID, candidate).unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_value = settings.get_i64(LAST_SEEN_RECEIPT_ID).unwrap().unwrap();
+        // Highest possible candidate written by either thread: max(10+199, 20+199) = 219.
+        assert_eq!(
+            final_value, 219,
+            "MAX-merge must converge to the largest candidate seen"
+        );
+        assert!(
+            final_value > 0,
+            "cursor must never roll back below earlier highs"
+        );
+    }
+
+    // Empty new rows ⇒ pending_ids empty, count = 0.
+    #[test]
+    fn pending_empty_when_nothing_new() {
+        let db = open_db();
+        let receipts_repo = ReceiptRepository::new(db.clone());
+        insert_receipt_raw(&db, 1, 1_000);
+        let last_id = 1;
+        let last_ts = 1_000;
+
+        let rows = receipts_repo
+            .fetch_pending_since(last_id, last_ts, 50)
+            .unwrap();
+        assert!(rows.is_empty());
+        let count = receipts_repo
+            .count_pending_since(last_id, last_ts)
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    // max_id_and_updated_at on empty table returns (0, 0).
+    #[test]
+    fn max_id_and_updated_at_empty_table_returns_zero() {
+        let db = open_db();
+        let repo = ReceiptRepository::new(db);
+        let (max_id, max_ts) = repo.max_id_and_updated_at().unwrap();
+        assert_eq!(max_id, 0);
+        assert_eq!(max_ts, 0);
+    }
+
+    // First-launch seeding constants are stable and exported.
+    #[test]
+    fn cursor_constants_are_stable() {
+        assert_eq!(LAST_SEEN_RECEIPT_ID, "last_seen_receipt_id");
+        assert_eq!(LAST_SEEN_MAX_UPDATED_AT, "last_seen_max_updated_at");
     }
 }

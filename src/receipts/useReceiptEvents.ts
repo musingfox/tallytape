@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { listReceipts } from '../ipc';
+import { takeBootCatchup } from '../ipc';
 import { useReceiptStore } from './store';
 import type { Receipt } from './types';
 
@@ -13,13 +13,15 @@ export function useReceiptEvents(): void {
     let cancelled = false;
     const unlistenPromises: Promise<UnlistenFn>[] = [];
 
-    // Hydrate baseline from backend
+    // Hydrate baseline from backend, carrying any boot-catch-up pending
+    // ids so receipts that arrived while the app was closed render with
+    // data-pending="true" on first paint. (p6-8)
     useReceiptStore.getState().setLoadStatus('loading');
-    listReceipts(null)
-      .then((list) => {
+    takeBootCatchup()
+      .then((payload) => {
         if (!cancelled) {
           const store = useReceiptStore.getState();
-          store.setReceipts(list);
+          store.hydrateWithPending(payload.receipts, payload.pendingIds, payload.overflowCount);
           store.setLoadStatus('ready');
         }
       })

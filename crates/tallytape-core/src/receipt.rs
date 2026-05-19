@@ -151,6 +151,95 @@ impl ReceiptRepository {
         Ok(summaries)
     }
 
+    /// Return `(MAX(id), MAX(updated_at))` across the `receipts` table.
+    ///
+    /// Both components default to `0` when the table is empty. Used by the
+    /// catch-up cursors to seed first-ever launch and to record top-of-table
+    /// state on focus / exit events.
+    pub fn max_id_and_updated_at(&self) -> anyhow::Result<(i64, i64)> {
+        let conn = self.db.lock();
+        let row = conn
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0), COALESCE(MAX(updated_at), 0) FROM receipts",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .context("max_id_and_updated_at: query failed")?;
+        Ok(row)
+    }
+
+    /// Return the total number of receipts that arrived (or were updated)
+    /// since the given cursors. Used to compute the "+M more" overflow text
+    /// and the true `N` in the boot catch-up notification.
+    pub fn count_pending_since(
+        &self,
+        last_seen_id: i64,
+        last_seen_updated_at: i64,
+    ) -> anyhow::Result<i64> {
+        let conn = self.db.lock();
+        let count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM receipts \
+                 WHERE id > ?1 \
+                    OR (id <= ?1 AND updated_at > ?2)",
+                rusqlite::params![last_seen_id, last_seen_updated_at],
+                |row| row.get::<_, i64>(0),
+            )
+            .context("count_pending_since: query failed")?;
+        Ok(count)
+    }
+
+    /// Boot replay query: return up to `cap + 1` receipts that are newer
+    /// than `last_seen_id`, or whose `updated_at` is newer than
+    /// `last_seen_updated_at` even when `id ≤ last_seen_id`. Rows are
+    /// ordered newest-first (`id DESC`).
+    ///
+    /// The caller distinguishes overflow by checking `rows.len() > cap`.
+    /// When overflow occurs, the trailing row is *not* part of the user-
+    /// visible pending set but is loaded so the caller can still advance
+    /// cursors past it.
+    ///
+    /// Runs as a single deferred read transaction so any concurrent writer
+    /// cannot interleave between the SELECT planning and execution.
+    pub fn fetch_pending_since(
+        &self,
+        last_seen_id: i64,
+        last_seen_updated_at: i64,
+        cap: usize,
+    ) -> anyhow::Result<Vec<Receipt>> {
+        let limit = (cap as i64).saturating_add(1);
+        let mut conn = self.db.lock();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .context("fetch_pending_since: begin transaction failed")?;
+
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, session_id, cwd, date, created_at, updated_at \
+                 FROM receipts \
+                 WHERE id > ?1 \
+                    OR (id <= ?1 AND updated_at > ?2) \
+                 ORDER BY id DESC \
+                 LIMIT ?3",
+            )
+            .context("fetch_pending_since: prepare failed")?;
+
+        let rows = stmt
+            .query_map(
+                rusqlite::params![last_seen_id, last_seen_updated_at, limit],
+                Self::map_receipt_row,
+            )
+            .context("fetch_pending_since: query failed")?;
+
+        let mut receipts = Vec::new();
+        for row in rows {
+            receipts.push(row.context("fetch_pending_since: row decode failed")?);
+        }
+        drop(stmt);
+        tx.commit().context("fetch_pending_since: commit failed")?;
+        Ok(receipts)
+    }
+
     /// Return receipts whose `date` column is within `[start_date, end_date]` (inclusive).
     ///
     /// `start_date` and `end_date` must be ISO `YYYY-MM-DD` strings. Malformed

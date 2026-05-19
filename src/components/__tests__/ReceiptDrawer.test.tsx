@@ -231,6 +231,78 @@ describe('ReceiptDrawer', () => {
     });
   });
 
+  it('C6 (p6-8): boot-catch-up hydration keeps data-pending="true" on pendingIds rows', async () => {
+    // Simulate the boot flow: hydrateWithPending populates receipts AND
+    // pendingArrivals in a single call (no setReceipts clear).
+    const r1 = receipt({ id: 1, cwd: '/project/a', date: '2026-05-17' });
+    const r2 = receipt({ id: 2, cwd: '/project/b', date: '2026-05-18' });
+    const r3 = receipt({ id: 3, cwd: '/project/c', date: '2026-05-19' });
+
+    // Stub dismissPendingArrival so the marker survives the test assertion.
+    const originalDismiss = useReceiptStore.getState().dismissPendingArrival;
+    useReceiptStore.setState({
+      dismissPendingArrival: () => {
+        /* keep pending state for assertion */
+      },
+    } as Parameters<typeof useReceiptStore.setState>[0]);
+
+    act(() => {
+      useReceiptStore.getState().hydrateWithPending([r1, r2, r3], [2, 3], 0);
+      useReceiptStore.getState().setLoadStatus('ready');
+    });
+
+    render(<ReceiptDrawer />);
+
+    await waitFor(() => {
+      const pendingRow = screen.getByText('/project/c').closest('tr');
+      expect(pendingRow).toHaveAttribute('data-pending', 'true');
+    });
+
+    const seenRow = screen.getByText('/project/a').closest('tr');
+    expect(seenRow).toHaveAttribute('data-pending', 'false');
+
+    const otherPendingRow = screen.getByText('/project/b').closest('tr');
+    expect(otherPendingRow).toHaveAttribute('data-pending', 'true');
+
+    useReceiptStore.setState({
+      dismissPendingArrival: originalDismiss,
+    } as Parameters<typeof useReceiptStore.setState>[0]);
+  });
+
+  it('C7 (p6-8): pendingOverflowCount > 0 renders overflow row with action text', async () => {
+    act(() => {
+      useReceiptStore.getState().hydrateWithPending(
+        [receipt({ id: 1, cwd: '/project/a', date: '2026-05-17' })],
+        [1],
+        7,
+      );
+      useReceiptStore.getState().setLoadStatus('ready');
+    });
+
+    render(<ReceiptDrawer />);
+
+    const overflowRow = await screen.findByTestId('pending-overflow-row');
+    expect(overflowRow.textContent).toContain('+7 more arrived while you were away');
+  });
+
+  it('C7 (p6-8): pendingOverflowCount === 0 does NOT render overflow row', async () => {
+    act(() => {
+      useReceiptStore.getState().hydrateWithPending(
+        [receipt({ id: 1, cwd: '/project/a', date: '2026-05-17' })],
+        [],
+        0,
+      );
+      useReceiptStore.getState().setLoadStatus('ready');
+    });
+
+    render(<ReceiptDrawer />);
+
+    await waitFor(() => {
+      expect(screen.getByText('/project/a')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('pending-overflow-row')).toBeNull();
+  });
+
   it('C5: closed drawer hides table content', async () => {
     seedStore([
       receipt({ id: 1, cwd: '/project/a', date: '2026-05-17' }),

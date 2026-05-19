@@ -37,6 +37,9 @@ beforeEach(() => {
     if (cmd === "get_summary") {
       return { totalCost: 0, totalTokens: 0, sessionCount: 0, receiptCount: 0 };
     }
+    if (cmd === "take_boot_catchup") {
+      return { receipts: [], pendingIds: [], overflowCount: 0 };
+    }
     return [];
   });
   vi.mocked(requestPermission).mockResolvedValue("granted" as NotificationPermission);
@@ -50,6 +53,7 @@ describe("First-run notification permission prompt (C6)", () => {
       if (cmd === "get_app_setting" && a?.key === "notification_permission_asked") return null;
       if (cmd === "set_app_setting") return undefined;
       if (cmd === "get_summary") return { totalCost: 0, totalTokens: 0, sessionCount: 0, receiptCount: 0 };
+      if (cmd === "take_boot_catchup") return { receipts: [], pendingIds: [], overflowCount: 0 };
       return [];
     });
 
@@ -71,6 +75,7 @@ describe("First-run notification permission prompt (C6)", () => {
       const a = args as Record<string, string> | undefined;
       if (cmd === "get_app_setting" && a?.key === "notification_permission_asked") return "true";
       if (cmd === "get_summary") return { totalCost: 0, totalTokens: 0, sessionCount: 0, receiptCount: 0 };
+      if (cmd === "take_boot_catchup") return { receipts: [], pendingIds: [], overflowCount: 0 };
       return [];
     });
 
@@ -95,6 +100,7 @@ describe("First-run notification permission prompt (C6)", () => {
       if (cmd === "get_app_setting" && a?.key === "notification_permission_asked") return null;
       if (cmd === "set_app_setting") return undefined;
       if (cmd === "get_summary") return { totalCost: 0, totalTokens: 0, sessionCount: 0, receiptCount: 0 };
+      if (cmd === "take_boot_catchup") return { receipts: [], pendingIds: [], overflowCount: 0 };
       return [];
     });
 
@@ -116,6 +122,7 @@ describe("First-run notification permission prompt (C6)", () => {
       const a = args as Record<string, string> | undefined;
       if (cmd === "get_app_setting" && a?.key === "notification_permission_asked") return "true";
       if (cmd === "get_summary") return { totalCost: 0, totalTokens: 0, sessionCount: 0, receiptCount: 0 };
+      if (cmd === "take_boot_catchup") return { receipts: [], pendingIds: [], overflowCount: 0 };
       return [];
     });
 

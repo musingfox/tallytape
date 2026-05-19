@@ -36,6 +36,9 @@ function setupInvokeMock() {
     if (cmd === "get_summary") {
       return { totalCost: 0, totalTokens: 0, sessionCount: 0, receiptCount: 0 };
     }
+    if (cmd === "take_boot_catchup") {
+      return { receipts: [], pendingIds: [], overflowCount: 0 };
+    }
     return [];
   });
 }
@@ -128,6 +131,9 @@ describe("dashboard route", () => {
       }
       if (cmd === "get_summary") {
         return { totalCost: 1.5, totalTokens: 0, sessionCount: 1, receiptCount: 1 };
+      }
+      if (cmd === "take_boot_catchup") {
+        return { receipts: [], pendingIds: [], overflowCount: 0 };
       }
       return [];
     });
