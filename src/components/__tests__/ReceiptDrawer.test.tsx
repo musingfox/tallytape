@@ -18,6 +18,10 @@ vi.mock('@tanstack/react-router', () => ({
   useNavigate: () => vi.fn(),
 }));
 
+const { useReducedMotionMock } = vi.hoisted(() => ({
+  useReducedMotionMock: vi.fn<() => boolean | null>(),
+}));
+
 vi.mock('framer-motion', () => {
   const makeMotionComponent = (tag: string) => {
     type MotionProps = Record<string, unknown> & { onAnimationComplete?: () => void };
@@ -32,7 +36,13 @@ vi.mock('framer-motion', () => {
 
       const domProps: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(allProps)) {
-        if (!MOTION_KEYS.has(k) && k !== 'onAnimationComplete') {
+        if (k === 'onAnimationComplete') continue;
+        if (MOTION_KEYS.has(k)) {
+          // Expose motion config as inspectable data-* attrs so tests can
+          // assert on initial.y / transition.duration without a real
+          // framer-motion runtime.
+          domProps[`data-motion-${k}`] = JSON.stringify(v);
+        } else {
           domProps[k] = v;
         }
       }
@@ -50,6 +60,7 @@ vi.mock('framer-motion', () => {
     }),
     AnimatePresence: ({ children }: { children: React.ReactNode }) => <>{children}</>,
     LayoutGroup: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+    useReducedMotion: useReducedMotionMock,
   };
 });
 
@@ -84,6 +95,7 @@ function seedStore(
 
 beforeEach(() => {
   seedStore([]);
+  useReducedMotionMock.mockReturnValue(null);
 });
 
 describe('ReceiptDrawer', () => {
@@ -283,6 +295,70 @@ describe('ReceiptDrawer', () => {
 
     const overflowRow = await screen.findByTestId('pending-overflow-row');
     expect(overflowRow.textContent).toContain('+7 more arrived while you were away');
+  });
+
+  // -------------------------------------------------------------------------
+  // p6-2: fly-in animation direction + prefers-reduced-motion
+  // -------------------------------------------------------------------------
+
+  it('C8 (p6-2): default motion preference → row slides up from below (initial.y > 0)', async () => {
+    useReducedMotionMock.mockReturnValue(false);
+    seedStore([receipt({ id: 1, cwd: '/project/a', date: '2026-05-17' })]);
+
+    render(<ReceiptDrawer />);
+
+    const row = (await screen.findByText('/project/a')).closest('tr');
+    expect(row).not.toBeNull();
+    const initial = JSON.parse(row!.getAttribute('data-motion-initial')!);
+    const exit = JSON.parse(row!.getAttribute('data-motion-exit')!);
+    const transition = JSON.parse(row!.getAttribute('data-motion-transition')!);
+
+    expect(initial.y).toBe(20);
+    expect(exit.y).toBe(20);
+    expect(transition.duration).toBeGreaterThan(0);
+  });
+
+  it('C8 (p6-2): prefers-reduced-motion → y offset and duration collapse to 0', async () => {
+    useReducedMotionMock.mockReturnValue(true);
+    seedStore([receipt({ id: 1, cwd: '/project/a', date: '2026-05-17' })]);
+
+    render(<ReceiptDrawer />);
+
+    const row = (await screen.findByText('/project/a')).closest('tr');
+    const initial = JSON.parse(row!.getAttribute('data-motion-initial')!);
+    const exit = JSON.parse(row!.getAttribute('data-motion-exit')!);
+    const transition = JSON.parse(row!.getAttribute('data-motion-transition')!);
+
+    expect(initial.y).toBe(0);
+    expect(exit.y).toBe(0);
+    expect(transition.duration).toBe(0);
+  });
+
+  it('C8 (p6-2): reduced-motion path still fires onAnimationComplete → dismissPendingArrival', async () => {
+    useReducedMotionMock.mockReturnValue(true);
+    seedStore([receipt({ id: 1, cwd: '/project/a', date: '2026-05-17' })]);
+
+    const spy = vi.spyOn(useReceiptStore.getState(), 'dismissPendingArrival');
+
+    render(<ReceiptDrawer />);
+
+    await waitFor(() => expect(screen.getByText('/project/a')).toBeInTheDocument());
+
+    const arrival = receipt({ id: 2, cwd: '/project/b', date: '2026-05-18' });
+    act(() => {
+      useReceiptStore.setState((state) => ({
+        receipts: new Map([...state.receipts, [arrival.id, arrival]]),
+        pendingArrivals: [arrival],
+      }));
+    });
+
+    await screen.findByText('/project/b');
+
+    await waitFor(() => {
+      expect(useReceiptStore.getState().pendingArrivals).toEqual([]);
+    });
+    expect(spy).toHaveBeenCalledWith(2);
+    spy.mockRestore();
   });
 
   it('C7 (p6-8): pendingOverflowCount === 0 does NOT render overflow row', async () => {

@@ -1,4 +1,4 @@
-import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
+import { motion, AnimatePresence, LayoutGroup, useReducedMotion } from 'framer-motion';
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { listReceiptSummaries, type ReceiptSummaryDto } from '../ipc';
@@ -23,6 +23,14 @@ export function ReceiptDrawer() {
   const [focusedIndex, setFocusedIndex] = useState(0);
   const tbodyRef = useRef<HTMLTableSectionElement>(null);
   const [open, setOpen] = useState(true);
+
+  // p6-2: new receipt rows fly in from below. When the user prefers reduced
+  // motion, suppress the offset and drop transition duration to 0 — the row
+  // still appears, just without the slide. onAnimationComplete fires either
+  // way, so dismissPendingArrival still settles per-id.
+  const prefersReducedMotion = useReducedMotion();
+  const arrivalOffset = prefersReducedMotion ? 0 : 20;
+  const arrivalDuration = prefersReducedMotion ? 0 : 0.2;
 
   const idKey = receipts.map((r) => r.id).join(',');
 
@@ -239,10 +247,10 @@ export function ReceiptDrawer() {
                           key={receipt.id}
                           layout
                           data-pending={isPending ? 'true' : 'false'}
-                          initial={{ opacity: 0, y: -20 }}
+                          initial={{ opacity: 0, y: arrivalOffset }}
                           animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, y: -20 }}
-                          transition={{ duration: 0.2 }}
+                          exit={{ opacity: 0, y: arrivalOffset }}
+                          transition={{ duration: arrivalDuration }}
                           onAnimationComplete={() => handleAnimationComplete(receipt.id)}
                           tabIndex={index === focusedIndex ? 0 : -1}
                           aria-label={`View receipt for ${receipt.cwd} on ${receipt.date}`}
