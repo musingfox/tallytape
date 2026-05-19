@@ -15,6 +15,8 @@ use tallytape_core::{
     ItemRepository, ModelBreakdown, RangeSummary, Receipt, ReceiptRepository, ReceiptSummary,
     SummaryRepository,
 };
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, State};
 
 const RECEIPT_ADDED_EVENT: &str = "receipt-added";
@@ -617,6 +619,20 @@ fn run_debounced_receipt_scanner<E: EventEmitter, F: FocusProbe, N: Notification
     }
 }
 
+struct TrayState {
+    _icon: tauri::tray::TrayIcon,
+}
+
+fn bring_main_to_front(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| anyhow::anyhow!("main window not found"))?;
+    window.show().context("failed to show main window")?;
+    let _ = window.unminimize();
+    window.set_focus().context("failed to focus main window")?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -638,6 +654,44 @@ pub fn run() {
                 backend,
                 watcher: Mutex::new(Some(watcher)),
             });
+
+            let open_item = MenuItemBuilder::with_id("open", "Open tallytape").build(app)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .items(&[&open_item, &quit_item])
+                .build()?;
+            let tray_result = TrayIconBuilder::new()
+                .icon(tauri::include_image!("icons/32x32.png"))
+                .menu(&menu)
+                .on_menu_event(|app_handle, event| match event.id().as_ref() {
+                    "open" => {
+                        if let Err(e) = bring_main_to_front(app_handle) {
+                            eprintln!("tray open: failed to bring main to front: {e}");
+                        }
+                    }
+                    "quit" => app_handle.exit(0),
+                    _ => {}
+                })
+                .build(app);
+
+            match tray_result {
+                Ok(tray) => {
+                    app.manage(TrayState { _icon: tray });
+                    if let Some(window) = app.get_webview_window("main") {
+                        let win_for_event = window.clone();
+                        window.on_window_event(move |event| {
+                            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                                api.prevent_close();
+                                if let Err(e) = win_for_event.hide() {
+                                    eprintln!("close-to-tray: failed to hide main window: {e}");
+                                }
+                            }
+                        });
+                    }
+                }
+                Err(e) => eprintln!("failed to initialise system tray: {e}"),
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -659,16 +713,8 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::Reopen { .. } => {
-                if let Some(window) = app.get_webview_window("main") {
-                    if let Err(e) = window.show() {
-                        eprintln!("failed to show main window on reopen: {e}");
-                        return;
-                    }
-                    if let Err(e) = window.set_focus() {
-                        eprintln!("failed to focus main window on reopen: {e}");
-                    }
-                } else {
-                    eprintln!("reopen: main window not found");
+                if let Err(e) = bring_main_to_front(app) {
+                    eprintln!("reopen: failed to bring main to front: {e}");
                 }
             }
             _ => {}

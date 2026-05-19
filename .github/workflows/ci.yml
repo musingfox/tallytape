@@ -26,6 +26,11 @@ jobs:
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install Linux tray + webkit deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libayatana-appindicator3-dev libwebkit2gtk-4.1-dev
+
       - name: Rust fmt check
         run: cargo fmt --all -- --check
 
