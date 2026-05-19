@@ -228,6 +228,31 @@ impl EventEmitter for AppHandle {
     }
 }
 
+// FocusProbe trait — lets scanner ask whether the main window is focused
+pub trait FocusProbe: Send + Sync + 'static {
+    fn is_main_window_focused(&self) -> anyhow::Result<bool>;
+}
+
+impl FocusProbe for AppHandle {
+    fn is_main_window_focused(&self) -> anyhow::Result<bool> {
+        match self.get_webview_window("main") {
+            None => Ok(false),
+            Some(window) => window.is_focused().map_err(anyhow::Error::from),
+        }
+    }
+}
+
+// NotificationDispatcher trait — lets scanner send notifications; testable via stub
+pub trait NotificationDispatcher: Send + Sync + 'static {
+    fn dispatch(&self, title: &str, body: &str) -> anyhow::Result<()>;
+}
+
+impl NotificationDispatcher for AppHandle {
+    fn dispatch(&self, title: &str, body: &str) -> anyhow::Result<()> {
+        notify(self, title, body)
+    }
+}
+
 // C3: WatchSignal enum — crate-private
 enum WatchSignal {
     DatabaseTouched,
@@ -466,8 +491,10 @@ fn app_error(error: anyhow::Error) -> AppError {
     error.into()
 }
 
-fn start_receipt_watcher<E: EventEmitter>(
+fn start_receipt_watcher<E: EventEmitter, F: FocusProbe, N: NotificationDispatcher>(
     emitter: E,
+    focus: F,
+    notifier: N,
     backend: Arc<AppBackend>,
     database_path: PathBuf,
 ) -> anyhow::Result<WatcherHandle> {
@@ -493,7 +520,9 @@ fn start_receipt_watcher<E: EventEmitter>(
         .watch(&watched_parent, RecursiveMode::NonRecursive)
         .with_context(|| format!("failed to watch {}", watched_parent.display()))?;
 
-    let join = thread::spawn(move || run_debounced_receipt_scanner(emitter, backend, rx));
+    let join = thread::spawn(move || {
+        run_debounced_receipt_scanner(emitter, focus, notifier, backend, rx);
+    });
 
     Ok(WatcherHandle::from_parts(Some(watcher), tx_for_stop, join))
 }
@@ -517,9 +546,11 @@ fn event_touches_watched_database(
         .unwrap_or(false)
 }
 
-// C2: run_debounced_receipt_scanner — generic over EventEmitter; breaks on WatchSignal::Stop
-fn run_debounced_receipt_scanner<E: EventEmitter>(
+// C2: run_debounced_receipt_scanner — generic over EventEmitter, FocusProbe, NotificationDispatcher
+fn run_debounced_receipt_scanner<E: EventEmitter, F: FocusProbe, N: NotificationDispatcher>(
     emitter: E,
+    focus: F,
+    notifier: N,
     backend: Arc<AppBackend>,
     rx: mpsc::Receiver<WatchSignal>,
 ) {
@@ -555,6 +586,24 @@ fn run_debounced_receipt_scanner<E: EventEmitter>(
                             if let Err(e) = emitter.emit_receipt_change(change) {
                                 eprintln!("failed to emit receipt change: {e}");
                             }
+                            // Notify on Added only when window is not focused
+                            if matches!(change, ReceiptChange::Added(_)) {
+                                match focus.is_main_window_focused() {
+                                    Ok(true) => {
+                                        // window focused — skip notification
+                                    }
+                                    Ok(false) => {
+                                        if let Err(e) = notifier.dispatch("tallytape", "+1 receipt")
+                                        {
+                                            eprintln!("failed to send notification: {e}");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // fail-closed: treat as focused, suppress notification
+                                        eprintln!("failed to probe window focus: {e}");
+                                    }
+                                }
+                            }
                         }
                     }
                     Err(error) => eprintln!("failed to scan receipt changes: {error}"),
@@ -577,7 +626,14 @@ pub fn run() {
             let path = db_path().context("failed to resolve tallytape database path")?;
             let backend =
                 Arc::new(AppBackend::open(&path).context("failed to open tallytape database")?);
-            let watcher = start_receipt_watcher(app.handle().clone(), Arc::clone(&backend), path)?;
+            let handle = app.handle().clone();
+            let watcher = start_receipt_watcher(
+                handle.clone(),
+                handle.clone(),
+                handle,
+                Arc::clone(&backend),
+                path,
+            )?;
             app.manage(AppState {
                 backend,
                 watcher: Mutex::new(Some(watcher)),
@@ -596,12 +652,26 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { .. } => {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.shutdown_watcher();
                 }
             }
+            tauri::RunEvent::Reopen { .. } => {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(e) = window.show() {
+                        eprintln!("failed to show main window on reopen: {e}");
+                        return;
+                    }
+                    if let Err(e) = window.set_focus() {
+                        eprintln!("failed to focus main window on reopen: {e}");
+                    }
+                } else {
+                    eprintln!("reopen: main window not found");
+                }
+            }
+            _ => {}
         });
 }
 
@@ -727,6 +797,69 @@ mod tests {
                     events.push(("receipt-updated".to_string(), receipt.clone()));
                 }
             }
+            Ok(())
+        }
+    }
+
+    // StubFocusProbe — configurable Result<bool, String>
+    #[derive(Clone)]
+    struct StubFocusProbe {
+        result: Result<bool, String>,
+    }
+
+    impl StubFocusProbe {
+        fn returning(focused: bool) -> Self {
+            Self {
+                result: Ok(focused),
+            }
+        }
+
+        fn erroring(msg: &str) -> Self {
+            Self {
+                result: Err(msg.to_string()),
+            }
+        }
+    }
+
+    impl FocusProbe for StubFocusProbe {
+        fn is_main_window_focused(&self) -> anyhow::Result<bool> {
+            self.result.clone().map_err(|e| anyhow::anyhow!("{}", e))
+        }
+    }
+
+    // StubNotificationDispatcher — Vec recorder + optional first-call-errors fuse
+    #[derive(Clone)]
+    struct StubNotificationDispatcher {
+        recorded: Arc<Mutex<Vec<(String, String)>>>,
+        error_once: Arc<Mutex<Option<String>>>,
+    }
+
+    impl StubNotificationDispatcher {
+        fn new() -> Self {
+            Self {
+                recorded: Arc::new(Mutex::new(Vec::new())),
+                error_once: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn erroring_once(msg: &str) -> Self {
+            Self {
+                recorded: Arc::new(Mutex::new(Vec::new())),
+                error_once: Arc::new(Mutex::new(Some(msg.to_string()))),
+            }
+        }
+    }
+
+    impl NotificationDispatcher for StubNotificationDispatcher {
+        fn dispatch(&self, title: &str, body: &str) -> anyhow::Result<()> {
+            let mut fuse = self.error_once.lock().unwrap();
+            if let Some(msg) = fuse.take() {
+                return Err(anyhow::anyhow!("{}", msg));
+            }
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((title.to_string(), body.to_string()));
             Ok(())
         }
     }
@@ -1110,7 +1243,13 @@ mod tests {
         let stub_clone = stub.clone();
         let backend_clone = Arc::clone(&backend);
         let handle = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         // Send 5 DatabaseTouched signals in quick succession
@@ -1140,7 +1279,13 @@ mod tests {
         let stub_clone = stub.clone();
         let backend_clone = Arc::clone(&backend);
         let handle = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         tx.send(WatchSignal::Stop).unwrap();
@@ -1162,7 +1307,13 @@ mod tests {
         let stub_clone = stub.clone();
         let backend_clone = Arc::clone(&backend);
         let handle = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         // Burst 1: emit receipt-added
@@ -1219,7 +1370,13 @@ mod tests {
         let backend_clone = Arc::clone(&backend);
         let stub_clone = stub.clone();
         let join = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         let mut handle = WatcherHandle::from_parts(None, tx, join);
@@ -1296,7 +1453,13 @@ mod tests {
         let stub_clone = stub.clone();
         let backend_clone = Arc::clone(&backend);
         let join = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         let watcher_handle = WatcherHandle::from_parts(None, tx, join);
@@ -1343,7 +1506,13 @@ mod tests {
         let stub_clone = stub.clone();
         let backend_clone = Arc::clone(&backend);
         let handle = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         tx.send(WatchSignal::DatabaseTouched).unwrap();
@@ -1373,7 +1542,13 @@ mod tests {
         let stub_clone = stub.clone();
         let backend_clone = Arc::clone(&backend);
         let handle = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         tx.send(WatchSignal::DatabaseTouched).unwrap();
@@ -1419,7 +1594,13 @@ mod tests {
         let stub_clone = stub.clone();
         let backend_clone = Arc::clone(&backend);
         let handle = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         tx.send(WatchSignal::DatabaseTouched).unwrap();
@@ -1449,7 +1630,13 @@ mod tests {
         let stub_clone = stub.clone();
         let backend_clone = Arc::clone(&backend);
         let handle = thread::spawn(move || {
-            run_debounced_receipt_scanner(stub_clone, backend_clone, rx);
+            run_debounced_receipt_scanner(
+                stub_clone,
+                StubFocusProbe::returning(false),
+                StubNotificationDispatcher::new(),
+                backend_clone,
+                rx,
+            );
         });
 
         // First drain: seats the snapshot with receipt-added
@@ -1788,8 +1975,14 @@ mod tests {
         let backend = Arc::new(AppBackend::open(&db_path).unwrap());
         let stub = StubEmitter::default();
 
-        let mut handle =
-            start_receipt_watcher(stub.clone(), Arc::clone(&backend), db_path.clone()).unwrap();
+        let mut handle = start_receipt_watcher(
+            stub.clone(),
+            StubFocusProbe::returning(false),
+            StubNotificationDispatcher::new(),
+            Arc::clone(&backend),
+            db_path.clone(),
+        )
+        .unwrap();
 
         // Use a second Database::open (mirroring concurrent_writer_style_writes_and_app_reads_do_not_lock)
         let writer_db = Database::open(&db_path).unwrap();
@@ -1812,5 +2005,337 @@ mod tests {
         }
 
         handle.shutdown();
+    }
+
+    // ---------------------------------------------------------------------------
+    // TC-1: added + unfocused → notify
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn notify_added_unfocused_sends_notification() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        insert_receipt(&writer_db, "/tc1", 1_777_593_600);
+
+        let emitter = StubEmitter::default();
+        let notifier = StubNotificationDispatcher::new();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let emitter_clone = emitter.clone();
+        let notifier_clone = notifier.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(
+                emitter_clone,
+                StubFocusProbe::returning(false),
+                notifier_clone,
+                backend_clone,
+                rx,
+            );
+        });
+
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let notifications = notifier.recorded.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0],
+            ("tallytape".to_string(), "+1 receipt".to_string())
+        );
+
+        let events = emitter.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "receipt-added");
+    }
+
+    // ---------------------------------------------------------------------------
+    // TC-2: added + focused → no notify
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn notify_added_focused_no_notification() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        insert_receipt(&writer_db, "/tc2", 1_777_593_600);
+
+        let emitter = StubEmitter::default();
+        let notifier = StubNotificationDispatcher::new();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let emitter_clone = emitter.clone();
+        let notifier_clone = notifier.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(
+                emitter_clone,
+                StubFocusProbe::returning(true),
+                notifier_clone,
+                backend_clone,
+                rx,
+            );
+        });
+
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let notifications = notifier.recorded.lock().unwrap();
+        assert!(
+            notifications.is_empty(),
+            "should be no notifications when focused"
+        );
+
+        let events = emitter.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "receipt-added");
+    }
+
+    // ---------------------------------------------------------------------------
+    // TC-3: updated + unfocused → no notify
+    // The first drain (Added) runs with focus=true to avoid a notification there;
+    // the second drain (Updated) runs with focus=false — the key assertion is that
+    // Updated receipts never produce notifications, even when unfocused.
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn notify_updated_unfocused_no_notification() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        let id = insert_receipt(&writer_db, "/tc3", 1_777_593_600);
+
+        // Dynamic focus probe: starts true (first drain = focused), flips to false for second drain
+        let focused = Arc::new(AtomicBool::new(true));
+
+        #[derive(Clone)]
+        struct DynamicFocusProbe(Arc<AtomicBool>);
+        impl FocusProbe for DynamicFocusProbe {
+            fn is_main_window_focused(&self) -> anyhow::Result<bool> {
+                Ok(self.0.load(Ordering::SeqCst))
+            }
+        }
+
+        let emitter = StubEmitter::default();
+        let notifier = StubNotificationDispatcher::new();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let emitter_clone = emitter.clone();
+        let notifier_clone = notifier.clone();
+        let backend_clone = Arc::clone(&backend);
+        let focused_clone = Arc::clone(&focused);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(
+                emitter_clone,
+                DynamicFocusProbe(focused_clone),
+                notifier_clone,
+                backend_clone,
+                rx,
+            );
+        });
+
+        // First burst: receipt-added; probe=true → no notification
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+
+        // Flip probe to unfocused for second burst
+        focused.store(false, Ordering::SeqCst);
+
+        // Bump updated_at so next scan sees an update
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 10;
+        {
+            let conn = writer_db.lock();
+            conn.execute(
+                "UPDATE receipts SET updated_at = ?1 WHERE id = ?2",
+                [now, id],
+            )
+            .unwrap();
+        }
+
+        // Second burst: receipt-updated; probe=false → still no notification (Updated never notifies)
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        // Neither burst should produce a notification:
+        //   first burst: Added but focused=true → suppressed
+        //   second burst: Updated → always suppressed
+        let notifications = notifier.recorded.lock().unwrap();
+        assert!(
+            notifications.is_empty(),
+            "updated receipts must not trigger notifications"
+        );
+
+        let events = emitter.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "receipt-added");
+        assert_eq!(events[1].0, "receipt-updated");
+    }
+
+    // ---------------------------------------------------------------------------
+    // TC-4: focus probe Err → fail-closed (no notification, no panic)
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn notify_focus_probe_error_fail_closed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        insert_receipt(&writer_db, "/tc4", 1_777_593_600);
+
+        let emitter = StubEmitter::default();
+        let notifier = StubNotificationDispatcher::new();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let emitter_clone = emitter.clone();
+        let notifier_clone = notifier.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(
+                emitter_clone,
+                StubFocusProbe::erroring("simulated"),
+                notifier_clone,
+                backend_clone,
+                rx,
+            );
+        });
+
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let notifications = notifier.recorded.lock().unwrap();
+        assert!(
+            notifications.is_empty(),
+            "focus probe error must suppress notification"
+        );
+
+        let events = emitter.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "receipt-added");
+    }
+
+    // ---------------------------------------------------------------------------
+    // TC-5: dispatcher Err → swallowed; subsequent dispatches still succeed
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn notify_dispatcher_error_swallowed_subsequent_succeeds() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        insert_receipt(&writer_db, "/tc5a", 1_777_593_600);
+
+        let emitter = StubEmitter::default();
+        let notifier = StubNotificationDispatcher::erroring_once("plugin down");
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let emitter_clone = emitter.clone();
+        let notifier_clone = notifier.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(
+                emitter_clone,
+                StubFocusProbe::returning(false),
+                notifier_clone,
+                backend_clone,
+                rx,
+            );
+        });
+
+        // First burst: dispatcher errors (erroring_once fuse fires)
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+
+        {
+            let events = emitter.events.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, "receipt-added");
+        }
+
+        // Insert a second receipt for the second burst
+        insert_receipt(&writer_db, "/tc5b", 1_777_680_000);
+
+        // Second burst: dispatcher succeeds
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        // First call errored (no record); second call recorded
+        let notifications = notifier.recorded.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0],
+            ("tallytape".to_string(), "+1 receipt".to_string())
+        );
+
+        let events = emitter.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "receipt-added");
+        assert_eq!(events[1].0, "receipt-added");
+    }
+
+    // ---------------------------------------------------------------------------
+    // TC-6: three adds in one burst → three notifications
+    // ---------------------------------------------------------------------------
+    #[test]
+    fn notify_three_adds_one_burst_three_notifications() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let backend = Arc::new(AppBackend::open(&path).unwrap());
+
+        let writer_db = Database::open(&path).unwrap();
+        let t = 1_777_593_600i64;
+        insert_receipt(&writer_db, "/tc6a", t);
+        insert_receipt(&writer_db, "/tc6b", t);
+        insert_receipt(&writer_db, "/tc6c", t);
+
+        let emitter = StubEmitter::default();
+        let notifier = StubNotificationDispatcher::new();
+        let (tx, rx) = mpsc::channel::<WatchSignal>();
+        let emitter_clone = emitter.clone();
+        let notifier_clone = notifier.clone();
+        let backend_clone = Arc::clone(&backend);
+        let handle = thread::spawn(move || {
+            run_debounced_receipt_scanner(
+                emitter_clone,
+                StubFocusProbe::returning(false),
+                notifier_clone,
+                backend_clone,
+                rx,
+            );
+        });
+
+        tx.send(WatchSignal::DatabaseTouched).unwrap();
+        thread::sleep(WATCH_DEBOUNCE * 2);
+        tx.send(WatchSignal::Stop).unwrap();
+        handle.join().unwrap();
+
+        let notifications = notifier.recorded.lock().unwrap();
+        assert_eq!(
+            notifications.len(),
+            3,
+            "three adds must produce three notifications"
+        );
+        assert!(
+            notifications
+                .iter()
+                .all(|(t, b)| t == "tallytape" && b == "+1 receipt"),
+            "all notifications must have correct title and body"
+        );
     }
 }
