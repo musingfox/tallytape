@@ -11,8 +11,12 @@ pub struct Cli {
 pub enum Command {
     /// Read hook payload from stdin and process the session (default).
     Run,
-    /// Print Claude Code settings.json snippet for hook installation.
+    /// Patch `~/.claude/settings.json` to register tallytape's SessionEnd hook.
+    /// Idempotent; creates a `.bak` before any modification.
     InstallHook,
+    /// Remove tallytape's SessionEnd entry from `~/.claude/settings.json`.
+    /// No-op if the entry is absent. Creates a `.bak` before any modification.
+    UninstallHook,
     /// Internal: background worker that performs the actual ingest.
     #[command(hide = true, name = "__worker")]
     Worker,
@@ -22,6 +26,7 @@ impl Cli {
     pub fn resolved_command(&self) -> Command {
         match &self.command {
             Some(Command::InstallHook) => Command::InstallHook,
+            Some(Command::UninstallHook) => Command::UninstallHook,
             Some(Command::Worker) => Command::Worker,
             _ => Command::Run,
         }

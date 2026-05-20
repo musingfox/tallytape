@@ -7,6 +7,9 @@ use clap::Parser;
 use tallytape_writer::cli::{Cli, Command};
 use tallytape_writer::detach;
 use tallytape_writer::error_log;
+use tallytape_writer::hook_install::{
+    install_hook, uninstall_hook, InstallAction, InstallReport, UninstallReport,
+};
 use tallytape_writer::log_subscriber;
 use tallytape_writer::payload::parse_payload;
 use tallytape_writer::persist;
@@ -84,24 +87,81 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let snippet = serde_json::json!({
-                "hooks": {
-                    "SessionEnd": [
-                        {
-                            "matcher": "",
-                            "hooks": [
-                                { "type": "command", "command": exe.to_string_lossy() }
-                            ]
-                        }
-                    ]
+            let settings = match settings_path() {
+                Some(p) => p,
+                None => {
+                    eprintln!("install-hook: HOME is not set; cannot locate ~/.claude/settings.json");
+                    return ExitCode::FAILURE;
                 }
-            });
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&snippet)
-                    .expect("static json! value always serializes")
-            );
-            ExitCode::SUCCESS
+            };
+            match install_hook(&settings, &exe) {
+                Ok(report) => {
+                    print_install_report(&report);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("install-hook: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
         }
+        Command::UninstallHook => {
+            let settings = match settings_path() {
+                Some(p) => p,
+                None => {
+                    eprintln!(
+                        "uninstall-hook: HOME is not set; cannot locate ~/.claude/settings.json"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            };
+            match uninstall_hook(&settings) {
+                Ok(report) => {
+                    print_uninstall_report(&report);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("uninstall-hook: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
+fn settings_path() -> Option<PathBuf> {
+    claude_home().map(|h| h.join("settings.json"))
+}
+
+fn print_install_report(report: &InstallReport) {
+    let verb = match report.action {
+        InstallAction::Created => "created",
+        InstallAction::Added => "added",
+        InstallAction::UpdatedCommand => "updated",
+        InstallAction::NoOp => "unchanged (already installed)",
+    };
+    println!(
+        "install-hook: {verb} → {}",
+        report.settings_path.display()
+    );
+    if let Some(bak) = &report.backup_path {
+        println!("install-hook: backup → {}", bak.display());
+    }
+}
+
+fn print_uninstall_report(report: &UninstallReport) {
+    if report.removed {
+        println!(
+            "uninstall-hook: removed tallytape entry from {}",
+            report.settings_path.display()
+        );
+        if let Some(bak) = &report.backup_path {
+            println!("uninstall-hook: backup → {}", bak.display());
+        }
+    } else {
+        println!(
+            "uninstall-hook: no tallytape entry found in {} (no-op)",
+            report.settings_path.display()
+        );
     }
 }

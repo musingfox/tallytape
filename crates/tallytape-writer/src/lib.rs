@@ -5,6 +5,8 @@ pub mod detach;
 #[doc(hidden)]
 pub mod error_log;
 #[doc(hidden)]
+pub mod hook_install;
+#[doc(hidden)]
 pub mod log_subscriber;
 #[doc(hidden)]
 pub mod payload;
